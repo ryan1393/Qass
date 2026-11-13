@@ -165,6 +165,11 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
+GitHub Actions (`.github/workflows/tests.yml`) runs the suite on Python 3.11 for
+every push and pull request. Simulated time is slowed with
+`QASS_TEST_TIME_SCALE=0.1` there; set the same locally if timing tests flake on a
+slow machine.
+
 Tests marked `known_bug` are strict `xfail`. They document confirmed bugs that
 are not fixed yet. When one is fixed, the test starts passing, which fails the
 run: remove the marker then.

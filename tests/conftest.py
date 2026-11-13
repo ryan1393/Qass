@@ -89,7 +89,8 @@ def make_cfg(qass_port: int, health_port: int, qass_type: str = "auto",
 
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> WarpClock:
-    c = WarpClock(scale=0.05)
+    # real seconds per simulated second; raise it on slow machines (CI uses 0.1)
+    c = WarpClock(scale=float(os.getenv("QASS_TEST_TIME_SCALE", "0.05")))
     monkeypatch.setattr(time, "time", c.time)
     # the service measures intervals with worker_async.monotonic()
     monkeypatch.setattr(worker_async, "monotonic", c.mono)
