@@ -57,6 +57,15 @@ class Metrics:
             self.last_qass_message_ts = time.time()
             self.qass_connected = True
 
+    def mark_qass_connected(self, generation: int) -> None:
+        with self._lock:
+            self.qass_connected = True
+            self.qass_generation = generation
+
+    def mark_qass_disconnected(self) -> None:
+        with self._lock:
+            self.qass_connected = False
+
     def mark_plc_success(self) -> None:
         with self._lock:
             self.last_plc_success_ts = time.time()

@@ -248,6 +248,7 @@ class AsyncWorker:
             # New connection generation: anything from the old socket is stale
             self.qass_generation += 1
             self.qass_connected = True
+            self.metrics.mark_qass_connected(self.qass_generation)
             self.last_qass_data = time.time()
 
             # A stroke cannot continue across a reconnect
@@ -262,6 +263,7 @@ class AsyncWorker:
 
         except Exception as e:
             self.qass_connected = False
+            self.metrics.mark_qass_disconnected()
             self.metrics.mark_error(ERROR_QASS_DISCONNECTED)
             logging.error("QASS connect failed: %s", e)
             await asyncio.sleep(self.reconnect_delay)
@@ -297,6 +299,7 @@ class AsyncWorker:
             except Exception as e:
                 logging.error("QASS receive error: %s", e)
                 self.qass_connected = False
+                self.metrics.mark_qass_disconnected()
                 self.metrics.mark_error(ERROR_QASS_DISCONNECTED)
                 self.reader = self.writer = None
 

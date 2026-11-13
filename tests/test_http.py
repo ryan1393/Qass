@@ -121,3 +121,33 @@ async def test_health_server_binds_all_interfaces(run_service, plc, qass):
                 if st == "0A" and int(p, 16) == port:  # LISTEN
                     listening.add(addr)
     assert listening and all(set(a) == {"0"} for a in listening), listening
+
+
+async def test_metrics_connection_fields_follow_qass(run_service, plc, qass, conns):
+    """Fixed bug: metrics.qass_connected never went back to false and
+    metrics.qass_generation was always 0."""
+    plc.tags[SERIAL_TAG] = "SN7"
+    port = free_port()
+    async with run_service(make_cfg(qass.port, port)):
+        await qass.wait_connections(1)
+        await wait_http(port)
+        status, body = await get(port, "/metrics")
+        assert body["metrics"]["qass_connected"] is True
+        assert body["metrics"]["qass_generation"] == 1
+
+        await qass.drop_client()
+        await qass.wait_connections(2)
+        await wait_until(lambda: qass.received[1])
+        status, body = await get(port, "/metrics")
+        assert body["metrics"]["qass_generation"] == 2
+
+        conns.refuse = True
+        await qass.drop_client()
+        for _ in range(200):
+            status, body = await get(port, "/metrics")
+            if status == 503:
+                break
+            await REAL_SLEEP(0.01)
+        assert status == 503
+        assert body["metrics"]["qass_connected"] is False
+
