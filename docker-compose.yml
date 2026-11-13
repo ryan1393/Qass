@@ -6,6 +6,7 @@
 # One machine only:  docker compose up -d --build qass-machine4
 
 x-qass-service: &qass-service
+  build: .                 # without this, --build silently reuses the old image
   image: qass-service:13.0
   restart: always
   network_mode: host

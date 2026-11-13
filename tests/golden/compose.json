@@ -1,6 +1,7 @@
 {
   "services": {
     "qass-machine1": {
+      "build": ".",
       "command": [
         "python3",
         "main.py",
@@ -19,6 +20,7 @@
       ]
     },
     "qass-machine2": {
+      "build": ".",
       "command": [
         "python3",
         "main.py",
@@ -37,6 +39,7 @@
       ]
     },
     "qass-machine3": {
+      "build": ".",
       "command": [
         "python3",
         "main.py",
@@ -55,6 +58,7 @@
       ]
     },
     "qass-machine4": {
+      "build": ".",
       "command": [
         "python3",
         "main.py",
