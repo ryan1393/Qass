@@ -93,3 +93,16 @@ async def test_qass_disconnect_marks_not_connected(run_service, plc, qass, conns
         await qass.drop_client()
         await wait_until(lambda: not svc.worker.qass_connected)
         assert svc.worker.metrics.error_counts[10] >= 1  # keyed by numeric code
+
+
+async def test_old_socket_is_closed_on_reconnect(run_service, plc, qass):
+    """Fixed bug: after a receive error the old socket was dropped without
+    closing it (one leaked file descriptor per reconnect)."""
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.writer is not None)
+        old_writer = svc.worker.writer
+        await qass.drop_client()
+        await qass.wait_connections(2)
+        assert old_writer.transport.is_closing()

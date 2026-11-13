@@ -265,9 +265,22 @@ class AsyncWorker:
             self.qass_connected = False
             self.metrics.mark_qass_disconnected()
             self.metrics.mark_error(ERROR_QASS_DISCONNECTED)
+            # If the TCP connect worked but the subscribe failed, do not keep
+            # reading from that half-set-up socket.
+            self._close_qass_socket()
             logging.error("QASS connect failed: %s", e)
             await asyncio.sleep(self.reconnect_delay)
             self.reconnect_delay = min(self.reconnect_delay * 2, self.reconnect_max)
+
+    def _close_qass_socket(self) -> None:
+        """Forget the current QASS connection and close its socket (no waiting)."""
+        writer = self.writer
+        self.reader = self.writer = None
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
 
     async def _receiver(self) -> None:
         """Read raw payloads from QASS; queue the ones that contain "measuring"."""
@@ -301,7 +314,7 @@ class AsyncWorker:
                 self.qass_connected = False
                 self.metrics.mark_qass_disconnected()
                 self.metrics.mark_error(ERROR_QASS_DISCONNECTED)
-                self.reader = self.writer = None
+                self._close_qass_socket()
 
     # ---------- Stroke processing ----------
 
