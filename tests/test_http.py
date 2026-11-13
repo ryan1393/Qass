@@ -151,3 +151,24 @@ async def test_metrics_connection_fields_follow_qass(run_service, plc, qass, con
         assert status == 503
         assert body["metrics"]["qass_connected"] is False
 
+
+async def test_logs_when_file_missing(run_service, plc, qass, monkeypatch):
+    """Fixed bug: /logs returned HTTP 500 before the log file existed."""
+    monkeypatch.setenv("QASS_LOG_FILE", "does_not_exist.log")
+    port = free_port()
+    async with run_service(make_cfg(qass.port, port)):
+        await wait_http(port)
+        status, body = await get(port, "/logs")
+    assert (status, body) == (200, {"logs": []})
+
+
+async def test_logs_short_file_and_bad_bytes(run_service, plc, qass, monkeypatch):
+    monkeypatch.setenv("QASS_LOG_FILE", "qass_short.log")
+    (paths.LOG_DIR / "qass_short.log").write_bytes(b"a\n\xff b\nc")
+    port = free_port()
+    async with run_service(make_cfg(qass.port, port)):
+        await wait_http(port)
+        status, body = await get(port, "/logs")
+    assert status == 200
+    assert body == {"logs": ["a\n", "\ufffd b\n", "c"]}
+

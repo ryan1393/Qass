@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 import time
+from collections import deque
 from typing import Any, Callable, TypeVar
 
 from aiohttp import web
@@ -641,12 +642,18 @@ class AsyncWorker:
                 status=200 if healthy else 503,
             )
 
-        async def logs(_request: web.Request) -> web.Response:
+        def tail_log() -> list[str]:
             logfile = LOG_DIR / os.getenv("QASS_LOG_FILE", "qass.log")
+            try:
+                with open(logfile, "r", errors="replace") as f:
+                    # streams the file instead of loading all of it (up to 10 MB)
+                    return list(deque(f, maxlen=LOG_TAIL_LINES))
+            except FileNotFoundError:
+                return []
 
-            with open(logfile, "r") as f:
-                lines = f.readlines()[-LOG_TAIL_LINES:]
-
+        async def logs(_request: web.Request) -> web.Response:
+            # file I/O off the event loop so QASS/PLC tasks are not stalled
+            lines = await self.loop.run_in_executor(None, tail_log)
             return web.json_response({"logs": lines})
 
         app = web.Application()
