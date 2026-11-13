@@ -147,3 +147,27 @@ async def test_invalid_config_exits_with_clear_message(tmp_path, qass):
     assert code == 1
     assert "Invalid config:" in console and "plc.serial_tag" in console
     assert "Traceback" not in console
+
+
+async def test_state_file_is_per_machine_in_state_dir(tmp_path, qass):
+    """Fixed bug: state.db used to be written to the working dir (/app), which
+    is lost when the container is rebuilt. It now lives in QASS_STATE_DIR (the
+    qass_state volume) with a per-machine name."""
+    import sqlite3
+
+    port = free_port()
+    cfg = make_cfg(qass.port, port, qass={"disconnect_timeout_sec": 2})
+    app, proc, out, _ = await run_main(
+        tmp_path, qass, cfg, "config_machine7.yaml", "configs/config_machine7.yaml")
+    try:
+        await drive_one_stroke_then_go_silent(qass, port, proc)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+    db = tmp_path / "state" / "state_config_machine7.db"
+    assert db.exists()
+    assert not (app / "state.db").exists()
+    row = sqlite3.connect(db).execute("SELECT ident, stroke, buffer FROM stroke_state").fetchone()
+    assert row == ("SN42", 2, "[]")
+

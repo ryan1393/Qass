@@ -18,7 +18,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 from config import ConfigError, load_config, resolve_config_path
-from paths import LOG_DIR
+from paths import LOG_DIR, state_db_path
 from worker_async import AsyncWorker
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -36,8 +36,12 @@ async def main() -> None:
         logging.critical("Invalid config: %s", e)
         raise SystemExit(1)
 
+    state_path = state_db_path(config_path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.info("Stroke state file: %s", state_path)
+
     shutdown_event = asyncio.Event()
-    worker = AsyncWorker(cfg)
+    worker = AsyncWorker(cfg, state_path)
 
     try:
         await worker.start(shutdown_event)

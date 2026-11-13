@@ -189,7 +189,8 @@ def run_service(workdir: Path, plc: PlcSim, conns: ConnRecorder, saves):
 
     @asynccontextmanager
     async def _run(cfg: dict) -> AsyncIterator[Service]:
-        worker = worker_async.AsyncWorker(cfg)
+        # mirrors main.main(): per-machine state file in the state dir
+        worker = worker_async.AsyncWorker(cfg, workdir / "state" / "state_test.db")
         event = asyncio.Event()
 
         async def main_like() -> None:

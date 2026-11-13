@@ -87,3 +87,11 @@ def test_resolve_config_path(arg, expected):
 def test_missing_sections_reported_not_crashing():
     with pytest.raises(ConfigError, match=r"qass \(section\).*plc \(section\)"):
         validate_config({"health": {"port": 1}, "reconnect": {"initial_delay": 1, "max_delay": 2}})
+
+
+def test_state_db_path_is_per_config(monkeypatch):
+    import paths
+    assert paths.state_db_path(Path("configs/config_machine3.yaml")) == \
+        paths.STATE_DIR / "state_config_machine3.db"
+    names = {paths.state_db_path(p).name for p in MACHINE_CONFIGS}
+    assert len(names) == len(MACHINE_CONFIGS)  # no two machines share a file

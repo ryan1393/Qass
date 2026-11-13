@@ -77,7 +77,8 @@ def _non_numeric_fields(record: dict) -> list[str]:
 class AsyncWorker:
     """Runs one machine: one QASS unit, one PLC. Must be created inside a running loop."""
 
-    def __init__(self, cfg: dict) -> None:
+    def __init__(self, cfg: dict, state_path: str | os.PathLike) -> None:
+        """``state_path``: SQLite file for the stroke state (see paths.state_db_path)."""
         qass = cfg["qass"]
         plc = cfg["plc"]
 
@@ -138,7 +139,7 @@ class AsyncWorker:
         self.shutdown_flag = False
 
         # Persistent stroke state
-        self.state = StrokeStateStore()
+        self.state = StrokeStateStore(state_path)
         self.ident, self.stroke, self.stroke_buffer = self.state.load()
 
         # PLC watchdog tracking
