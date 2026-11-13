@@ -101,6 +101,7 @@ class PlcSim:
     calls: list[PlcCall] = field(default_factory=list)
     fail_reads: int = 0  # raise on the next N Read() calls
     fail_writes: int = 0  # raise on the next N Write() calls
+    fail_write_tags: dict = field(default_factory=dict)  # tag -> raise N times
     fail_all: bool = False  # raise on every Read/Write while True
     # return an error Status (what real pylogix does when the PLC is unreachable)
     status_fail: bool = False
@@ -176,6 +177,9 @@ class PlcSim:
                     time.sleep(sim.write_delay)
                     if sim.fail_all or sim.fail_writes > 0:
                         sim.fail_writes = max(0, sim.fail_writes - 1)
+                        raise PlcFault(f"injected write failure on {tag}")
+                    if sim.fail_write_tags.get(tag, 0) > 0:
+                        sim.fail_write_tags[tag] -= 1
                         raise PlcFault(f"injected write failure on {tag}")
                     if sim.status_fail:
                         return Response(tag, value, UNREACHABLE)
