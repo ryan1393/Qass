@@ -21,11 +21,14 @@ def test_shipped_machine_configs_are_valid(path):
     assert cfg["qass"]["type"] in ("auto", "manual")
 
 
-def test_default_yaml_is_rejected_with_a_clear_message():
-    # default.yaml is type 'auto' without plc.current_tag. The old code failed
-    # on it too (KeyError: 'current_tag'); now the message says why.
-    with pytest.raises(ConfigError, match=r"plc\.current_tag \(required when qass\.type is 'auto'\)"):
-        load_config(REPO_ROOT / "configs" / "default.yaml")
+def test_missing_config_file_is_a_config_error(tmp_path):
+    with pytest.raises(ConfigError, match="config file not found"):
+        load_config(tmp_path / "nope.yaml")
+
+
+def test_no_default_yaml_shipped():
+    # removed: it pointed at machine3's QASS/PLC/health port and could not start
+    assert not (REPO_ROOT / "configs" / "default.yaml").exists()
 
 
 def test_validate_returns_config_unchanged():

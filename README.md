@@ -73,9 +73,10 @@ The code is re-evaluated every 2 s. Priority: 10 > 11 > 20 > 0.
 ## Configuration
 
 `python3 main.py <config>`. A relative path always resolves to
-`configs/<basename>`; with no argument `configs/default.yaml` is used. An absolute
-path is used as-is. The config is validated at startup: a missing key gives one
-`CRITICAL Invalid config: …` line listing every missing key, then exit code 1.
+`configs/<basename>`, and an absolute path is used as-is. With no argument the
+service looks for `configs/default.yaml`. That file is not shipped, so always pass
+a machine config (compose does). A missing file or key gives one
+`CRITICAL Invalid config: …` line and exit code 1. The config is validated at startup, and the error lists every missing key.
 
 | Key | Required | Notes |
 |---|---|---|
@@ -91,8 +92,7 @@ path is used as-is. The config is validated at startup: a missing key gives one
 | `health.port` | yes | HTTP port |
 | `reconnect.initial_delay`, `reconnect.max_delay` | yes | QASS reconnect backoff: starts at `initial_delay`, doubles up to `max_delay`, restarts at 1 after a successful connect |
 
-`configs/default.yaml` is `type: auto` without `plc.current_tag`, so it does
-not start as-is. Production uses `config_machine1..4.yaml`.
+Production uses `config_machine1..4.yaml`.
 
 ### Environment variables
 
@@ -175,8 +175,6 @@ to tags, IPs or ports fails the run.
 
 ## Known issues (not fixed yet)
 
-- `configs/default.yaml` is `type: auto` without `plc.current_tag`, so it does
-  not start. Production does not use it.
 - When the PLC host is down, each pylogix call still waits for its 5 s socket
   timeout. A transaction stops at its first comms failure, so the PLC lock is
   held for about 5 s per heartbeat or stroke, not 30 s.

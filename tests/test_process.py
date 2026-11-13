@@ -171,3 +171,15 @@ async def test_state_file_is_per_machine_in_state_dir(tmp_path, qass):
     row = sqlite3.connect(db).execute("SELECT ident, stroke, buffer FROM stroke_state").fetchone()
     assert row == ("SN42", 2, "[]")
 
+
+async def test_no_argument_without_default_yaml_exits_cleanly(tmp_path, qass):
+    """No config argument -> configs/default.yaml; it is no longer shipped, so
+    the service exits 1 with one clear line instead of a traceback."""
+    cfg = make_cfg(qass.port, free_port())
+    app, proc, out, _ = await run_main(tmp_path, qass, cfg, None, None)
+    code = await asyncio.wait_for(proc.wait(), timeout=20)
+    console = (await proc.stdout.read()).decode()
+    assert code == 1
+    assert "Invalid config:" in console and "default.yaml: config file not found" in console
+    assert "Traceback" not in console
+

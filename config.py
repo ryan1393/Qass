@@ -100,7 +100,13 @@ def validate_config(cfg: Any, source: str = "config") -> dict:
 
 
 def load_config(path: Path) -> dict:
-    """Read and validate a YAML config file."""
-    with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
+    """Read and validate a YAML config file (ConfigError if missing or invalid)."""
+    try:
+        with open(path, "r") as f:
+            cfg = yaml.safe_load(f)
+    except FileNotFoundError:
+        raise ConfigError(
+            f"{path}: config file not found "
+            "(pass one, e.g. configs/config_machine1.yaml)"
+        ) from None
     return validate_config(cfg, str(path))

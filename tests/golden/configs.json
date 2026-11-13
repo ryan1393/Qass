@@ -112,33 +112,5 @@
       "initial_delay": 1,
       "max_delay": 30
     }
-  },
-  "default.yaml": {
-    "health": {
-      "port": 8083
-    },
-    "plc": {
-      "break_tag": "QASS_Break_Limit",
-      "crack_tag": "QASS_Crack_Limit",
-      "enable_writes": false,
-      "error_code_tag": "QASS_LastErrorCode",
-      "heartbeat_tag": "QASS_Heartbeat",
-      "ip": "10.16.82.70",
-      "last_stroke_tag": "QASS_LastStroke",
-      "plc_ok_tag": "QASS_PlcCommOK",
-      "qass_ok_tag": "QASS_QassConnected",
-      "serial_tag": "PC_COMM.COM_TT300_From_PC.Serial_Num",
-      "service_ok_tag": "QASS_ServiceOK"
-    },
-    "qass": {
-      "disconnect_timeout_sec": 30,
-      "ip": "10.16.82.99",
-      "port": 17000,
-      "type": "auto"
-    },
-    "reconnect": {
-      "initial_delay": 1,
-      "max_delay": 30
-    }
   }
 }
