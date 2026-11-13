@@ -1,10 +1,13 @@
-from pathlib import Path
-import os
+"""Filesystem locations, overridable through environment variables."""
 
-def get_base_dir():
-    # If running in Docker, /app is WORKDIR
-    # If running locally, this resolves correctly
+import os
+from pathlib import Path
+
+
+def get_base_dir() -> Path:
+    """Directory containing the code (/app inside the container)."""
     return Path(__file__).resolve().parent
+
 
 BASE_DIR = get_base_dir()
 LOG_DIR = Path(os.getenv("QASS_LOG_DIR", BASE_DIR / "logs"))

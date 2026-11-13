@@ -82,3 +82,8 @@ def test_unknown_type_only_warns(caplog):
 ])
 def test_resolve_config_path(arg, expected):
     assert resolve_config_path(arg) == expected
+
+
+def test_missing_sections_reported_not_crashing():
+    with pytest.raises(ConfigError, match=r"qass \(section\).*plc \(section\)"):
+        validate_config({"health": {"port": 1}, "reconnect": {"initial_delay": 1, "max_delay": 2}})

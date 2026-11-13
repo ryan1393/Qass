@@ -76,14 +76,19 @@ def validate_config(cfg: Any, source: str = "config") -> dict:
             continue
         missing.extend(f"{section}.{k}" for k in keys if k not in values)
 
-    qass = cfg.get("qass") if isinstance(cfg.get("qass"), Mapping) else {}
-    plc = cfg.get("plc") if isinstance(cfg.get("plc"), Mapping) else {}
-    if qass.get("type") == "auto" and "current_tag" not in plc:
+    qass, plc = cfg.get("qass"), cfg.get("plc")
+    if (
+        isinstance(qass, Mapping)
+        and isinstance(plc, Mapping)
+        and qass.get("type") == "auto"
+        and "current_tag" not in plc
+    ):
         missing.append("plc.current_tag (required when qass.type is 'auto')")
 
     if missing:
         raise ConfigError(f"{source}: missing required key(s): {', '.join(missing)}")
 
+    qass = cfg["qass"]
     if qass.get("type") not in SUPPORTED_QASS_TYPES:
         # Unchanged behaviour: an unsupported type still raises when the first
         # stroke is written. Warn early so it shows up in the startup log.
@@ -91,7 +96,7 @@ def validate_config(cfg: Any, source: str = "config") -> dict:
             "%s: qass.type=%r is not one of %s; measurement writes will fail",
             source, qass.get("type"), "/".join(SUPPORTED_QASS_TYPES),
         )
-    return cfg  # type: ignore[return-value]
+    return dict(cfg) if not isinstance(cfg, dict) else cfg
 
 
 def load_config(path: Path) -> dict:

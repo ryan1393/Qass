@@ -1,23 +1,36 @@
-# Async worker that handles:
-# - QASS TCP communication
-# - Stroke processing
-# - PLC reads/writes
-# - Watchdogs
-# - Heartbeat
-# - HTTP health endpoint
+"""Async worker: QASS TCP client, stroke processing, PLC I/O, watchdogs, HTTP.
 
+One worker runs per machine (one Docker container each). Background tasks:
+
+* ``_receiver``       reads raw QASS payloads and queues the ones with "measuring"
+* ``_consumer``       parses queued payloads and detects strokes
+* ``_serial_loop``    reads the part serial number from the PLC every second
+* ``_plc_watchdog``   flags PLC comms as lost after 10 s without a successful call
+* ``_qass_watchdog``  derives the error code and exits the process when QASS has
+                      been silent for ``qass.disconnect_timeout_sec``
+* ``_heartbeat``      writes heartbeat + status tags to the PLC every 5 s
+* ``_health_server``  serves /health, /metrics and /logs
+
+All PLC calls go through ``_plc_call``: one lock, blocking pylogix calls run in
+the default thread-pool executor.
+
+PLC contract: the tag names, values, write order and intervals below are read
+by the PLC program. Do not change them without changing the PLC program.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import time
 import sys
+import time
+from typing import Any, Callable, TypeVar
+
 from aiohttp import web
 from pylogix import PLC
 
-from paths import LOG_DIR
-from state_store import StrokeStateStore
-from qass_normalizer import split_and_parse_qass_json
+from config import DEFAULT_DISCONNECT_TIMEOUT_SEC, DEFAULT_ENABLE_WRITES
 from metrics import (
     ERROR_NONE,
     ERROR_PLC_COMMS,
@@ -25,63 +38,89 @@ from metrics import (
     ERROR_QASS_NO_DATA,
     Metrics,
 )
+from paths import LOG_DIR
+from qass_normalizer import split_and_parse_qass_json
+from state_store import StrokeStateStore
+
+T = TypeVar("T")
+
+# QASS protocol
+QASS_SUBSCRIBE_CMD = b'{"cmd":"sendreadings","p1":"true"}'
+QASS_READ_SIZE = 12000  # bytes per socket read
+QASS_RECONNECT_RESET_DELAY = 1  # backoff restarts here after a successful connect
+QASS_NO_DATA_SEC = 10  # connected but no "measuring" payload -> ERROR_QASS_NO_DATA
+
+# Timing (seconds) — part of the PLC contract
+SERIAL_POLL_SEC = 1
+WATCHDOG_INTERVAL_SEC = 2
+HEARTBEAT_INTERVAL_SEC = 5
+PLC_COMMS_TIMEOUT_SEC = 10  # plc_ok is False after this long without a successful call
+
+STATE_SAVE_EVERY = 25  # persist the stroke buffer every N samples
+LOG_TAIL_LINES = 100  # lines returned by /logs
 
 
 class AsyncWorker:
-    def __init__(self, cfg):
+    """Runs one machine: one QASS unit, one PLC. Must be created inside a running loop."""
+
+    def __init__(self, cfg: dict) -> None:
+        qass = cfg["qass"]
+        plc = cfg["plc"]
+
         # ---------- Configuration ----------
         self.plc_lock = asyncio.Lock()
-        
+
         # QASS TCP endpoint
-        self.qass_ip = cfg["qass"]["ip"]
-        self.qass_port = cfg["qass"]["port"]
+        self.qass_ip: str = qass["ip"]
+        self.qass_port: int = qass["port"]
+        self.qass_type: str = qass["type"]  # "auto" or "manual"
+        self.disconnect_timeout_sec: float = qass.get(
+            "disconnect_timeout_sec", DEFAULT_DISCONNECT_TIMEOUT_SEC
+        )
 
-        # PLC configuration
-        self.plc_conn = None
-        plc = cfg["plc"]
-        self.plc_ip = plc["ip"]
-        self.sn_tag = plc["serial_tag"]
+        # PLC connection and read tag
+        # pylogix.PLC; None only until _connect_plc runs (a call on None raises
+        # inside _plc_call and is handled like any other PLC error)
+        self.plc_conn: Any = None
+        self.plc_ip: str = plc["ip"]
+        self.serial_tag: str = plc["serial_tag"]
 
-        # PLC measurement tags
-        self.type_tag = cfg["qass"]["type"] 
-        self.break_tag = plc["break_tag"]
-        self.crack_tag = plc["crack_tag"]   
-        if self.type_tag == "auto":                
-            self.current_tag = plc["current_tag"] 
+        # PLC measurement tags (manual mode writes QASS_Measurement_<stroke> instead)
+        self.break_tag: str = plc["break_tag"]
+        self.crack_tag: str = plc["crack_tag"]
+        self.current_tag: str | None = (
+            plc["current_tag"] if self.qass_type == "auto" else None
+        )
+
         # PLC heartbeat and status tags
-        self.heartbeat_tag = plc["heartbeat_tag"]
-        self.service_ok_tag = plc["service_ok_tag"]
-        self.qass_ok_tag = plc["qass_ok_tag"]
-        self.plc_ok_tag = plc["plc_ok_tag"]
-        self.last_stroke_tag = plc["last_stroke_tag"]
-        self.error_code_tag = plc["error_code_tag"]
+        self.heartbeat_tag: str = plc["heartbeat_tag"]
+        self.service_ok_tag: str = plc["service_ok_tag"]
+        self.qass_ok_tag: str = plc["qass_ok_tag"]
+        self.plc_ok_tag: str = plc["plc_ok_tag"]
+        self.last_stroke_tag: str = plc["last_stroke_tag"]
+        self.error_code_tag: str = plc["error_code_tag"]
 
-        # Master PLC write enable switch
-        self.plc_writes_enabled = plc.get("enable_writes", True)
+        # Master PLC write switch (False: no PLC writes at all, reads continue)
+        self.plc_writes_enabled: bool = plc.get("enable_writes", DEFAULT_ENABLE_WRITES)
 
         # HTTP health server port
-        self.health_port = cfg["health"]["port"]        
-        self.cfg = cfg
+        self.health_port: int = cfg["health"]["port"]
         self.metrics = Metrics()
 
+        # QASS reconnect backoff
+        self.reconnect_delay: float = cfg["reconnect"]["initial_delay"]
+        self.reconnect_max: float = cfg["reconnect"]["max_delay"]
 
-        # QASS reconnect backoff parameters
-        self.reconnect_delay = cfg["reconnect"]["initial_delay"]
-        self.reconnect_max = cfg["reconnect"]["max_delay"]
-
-        # ---------- Runtime State ----------
+        # ---------- Runtime state ----------
 
         # Async TCP reader / writer for QASS
-        self.reader = None
-        self.writer = None
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
 
-        # Queue separating socket reading from processing
-        self.queue = asyncio.Queue()
+        # Raw QASS payloads waiting for the consumer
+        self.queue: asyncio.Queue[str] = asyncio.Queue()
 
-        # Reference to the active event loop
         self.loop = asyncio.get_running_loop()
-
-        # Shutdown coordination flag
         self.shutdown_flag = False
 
         # Persistent stroke state
@@ -92,15 +131,15 @@ class AsyncWorker:
         self.last_plc_ok = time.time()
 
         # QASS tracking
-        self.last_qass_data = 0.0
+        self.last_qass_data = 0.0  # last "measuring" payload (or connect)
         self.qass_connected = False
-        self.qass_generation = 0
+        self.qass_generation = 0  # bumped on every successful connect
 
         # Heartbeat and error tracking
-        self.hb_value = 0
+        self.heartbeat_value = 0
         self.last_error_code = ERROR_NONE
-        
-        self.tasks = []
+
+        self.tasks: list[asyncio.Task] = []
 
         logging.info(
             "PLC writes %s",
@@ -109,43 +148,45 @@ class AsyncWorker:
 
     # ---------- Lifecycle ----------
 
-    async def start(self, shutdown_event):
-        # Start all background tasks
+    async def start(self, shutdown_event: asyncio.Event) -> None:
+        """Start all background tasks and block until ``shutdown_event`` is set.
+
+        The caller is responsible for calling :meth:`shutdown` afterwards.
+        """
         logging.info("Service started")
         await self._connect_plc()
 
         self.tasks = [
             asyncio.create_task(self._receiver()),
             asyncio.create_task(self._consumer()),
-            asyncio.create_task(self._ident_loop()),
+            asyncio.create_task(self._serial_loop()),
             asyncio.create_task(self._plc_watchdog()),
             asyncio.create_task(self._heartbeat()),
             asyncio.create_task(self._health_server()),
             asyncio.create_task(self._qass_watchdog()),
         ]
 
-        # Block until shutdown is requested; the caller (main) runs shutdown()
         await shutdown_event.wait()
 
-    async def shutdown(self):
-        # Clean shutdown of all tasks and sockets
+    async def shutdown(self) -> None:
+        """Cancel background tasks and close the QASS socket and PLC connection."""
         logging.info("Shutting down service")
         self.shutdown_flag = True
 
-        for t in self.tasks:
-            t.cancel()
+        for task in self.tasks:
+            task.cancel()
 
         if self.writer:
             self.writer.close()
             await self.writer.wait_closed()
-            
-        if self.plc_conn:    
+
+        if self.plc_conn:
             self.plc_conn.Close()
 
-    # ---------- QASS Communication ----------
+    # ---------- QASS communication ----------
 
-    async def _connect(self):
-        # Attempt TCP connection to QASS
+    async def _connect_qass(self) -> None:
+        """One connect attempt. On failure, sleep the backoff delay and double it."""
         try:
             logging.info("Connecting to QASS %s:%s", self.qass_ip, self.qass_port)
 
@@ -153,19 +194,19 @@ class AsyncWorker:
                 self.qass_ip, self.qass_port
             )
 
-            # Mark new connection generation
+            # New connection generation: anything from the old socket is stale
             self.qass_generation += 1
             self.qass_connected = True
             self.last_qass_data = time.time()
 
-            # Clear any partial stroke data
+            # A stroke cannot continue across a reconnect
             self.stroke_buffer.clear()
 
             # Subscribe to measurements
-            self.writer.write(b'{"cmd":"sendreadings","p1":"true"}')
+            self.writer.write(QASS_SUBSCRIBE_CMD)
             await self.writer.drain()
 
-            self.reconnect_delay = 1
+            self.reconnect_delay = QASS_RECONNECT_RESET_DELAY
             logging.info("QASS connected")
 
         except Exception as e:
@@ -175,28 +216,28 @@ class AsyncWorker:
             await asyncio.sleep(self.reconnect_delay)
             self.reconnect_delay = min(self.reconnect_delay * 2, self.reconnect_max)
 
-    async def _receiver(self):
-        # Receives raw payloads from QASS and queues them
-        local_gen = 0
+    async def _receiver(self) -> None:
+        """Read raw payloads from QASS; queue the ones that contain "measuring"."""
+        local_generation = 0
 
         while not self.shutdown_flag:
             if not self.reader:
-                await self._connect()
-                local_gen = self.qass_generation
+                await self._connect_qass()
+                local_generation = self.qass_generation
                 continue
 
             try:
-                data = await self.reader.read(12000)
+                data = await self.reader.read(QASS_READ_SIZE)
                 if not data:
                     raise ConnectionError("QASS disconnected")
 
-                # Ignore stale reads after reconnect
-                if local_gen != self.qass_generation:
+                # Ignore stale reads after a reconnect
+                if local_generation != self.qass_generation:
                     continue
 
                 payload = data.decode(errors="ignore")
                 self.metrics.mark_qass_message()
-                
+
                 # Only enqueue measurement payloads
                 if '"measuring"' in payload:
                     self.last_qass_data = time.time()
@@ -208,78 +249,74 @@ class AsyncWorker:
                 self.metrics.mark_error(ERROR_QASS_DISCONNECTED)
                 self.reader = self.writer = None
 
-    # ---------- Processing ----------
+    # ---------- Stroke processing ----------
 
-    async def _consumer(self):
-        # Process queued QASS payloads
+    async def _consumer(self) -> None:
+        """Parse queued payloads and feed each record to the stroke logic."""
         while not self.shutdown_flag:
             payload = await self.queue.get()
-            for r in split_and_parse_qass_json(payload):
-                await self._process_record(r)
+            for record in split_and_parse_qass_json(payload):
+                await self._process_record(record)
 
-    async def _process_record(self, r):
-        # Determine measuring state
-        measuring = str(r.get("measuring")).lower() == "true"
+    async def _process_record(self, record: dict) -> None:
+        """Buffer samples while measuring; on the first non-measuring record,
+        write the sample with the highest e_current to the PLC."""
+        measuring = str(record.get("measuring")).lower() == "true"
 
-        # Buffer samples during active stroke
+        # Buffer samples during an active stroke
         if measuring:
-            self.stroke_buffer.append(r)
-            if len(self.stroke_buffer) % 25 == 0:
-                self.state.save(
-                    self.ident,
-                    self.stroke,
-                    self.stroke_buffer
-                )
+            self.stroke_buffer.append(record)
+            if len(self.stroke_buffer) % STATE_SAVE_EVERY == 0:
+                self.state.save(self.ident, self.stroke, self.stroke_buffer)
             return
-        # Ignore end-of-stroke without data
+
+        # End-of-stroke without data: nothing to report
         if not self.stroke_buffer:
             return
 
-        # Determine maximum energy sample
-        max_pt = max(
-            self.stroke_buffer,
-            key=lambda x: int(x.get("e_current", 0))
-        )
+        # Peak sample (first one wins on ties)
+        peak = max(self.stroke_buffer, key=lambda x: int(x.get("e_current", 0)))
 
-        e_max = int(max_pt.get("e_max", 0))
-        e_current = int(max_pt.get("e_current", 0))
-        break_l = int(max_pt.get("limitbreak", 0))
-        crack_l = int(max_pt.get("limitcrack", 0))
+        e_max = int(peak.get("e_max", 0))
+        e_current = int(peak.get("e_current", 0))
+        break_limit = int(peak.get("limitbreak", 0))
+        crack_limit = int(peak.get("limitcrack", 0))
 
         logging.info(
             "Serial=%s Stroke=%s ECurrent=%s EMax=%s Break=%s Crack=%s",
             self.ident, self.stroke,
-            e_current, e_max, break_l, crack_l
+            e_current, e_max, break_limit, crack_limit,
         )
 
-        # Write results to PLC (if enabled)
-        await self._write_plc(e_current, break_l, crack_l)
-        
-        # Prepare for next stroke
+        await self._write_plc(e_current, break_limit, crack_limit)
+
+        # Prepare for the next stroke
         self.stroke_buffer.clear()
         self.stroke += 1
         self.metrics.mark_stroke_processed()
         self.state.save(self.ident, self.stroke, [])
 
-    # ---------- PLC Interaction ----------
-    
-    async def _connect_plc(self):
+    # ---------- PLC interaction ----------
+
+    async def _connect_plc(self) -> None:
+        """Create the PLC object and do one test read of the serial tag."""
         try:
             self.plc_conn = PLC(self.plc_ip)
 
-            # Test connection
-            result = await self._plc_call(
-                lambda: self.plc_conn.Read(self.sn_tag)
-            )
+            result = await self._plc_call(lambda: self.plc_conn.Read(self.serial_tag))
 
             if result.Status == "Success":
                 logging.info("PLC connected")
 
         except Exception:
             logging.exception("PLC connection failed")
-            
-    async def _plc_call(self, fn):
-        # Run blocking PLC calls in thread executor
+
+    async def _plc_call(self, fn: Callable[[], T]) -> T:
+        """Run a blocking pylogix call in the executor, serialized by ``plc_lock``.
+
+        On an exception the PLC object is closed and recreated, the error is
+        recorded (ERROR_PLC_COMMS) and the exception is re-raised.
+        """
         async with self.plc_lock:
             try:
                 result = await self.loop.run_in_executor(None, fn)
@@ -302,95 +339,98 @@ class AsyncWorker:
 
                 raise
 
-    async def _write_plc(self, e_current, break_l, crack_l):
+    async def _write_plc(self, e_current: int, break_limit: int, crack_limit: int) -> None:
+        """Write one stroke result. Order: break, crack, then the measurement tag."""
         start = time.perf_counter()
-        # Skip PLC writes if disabled
         if not self.plc_writes_enabled:
             logging.info("PLC writes disabled — skipping measurement write")
             return
-        if self.type_tag == "auto":
-            def write():
-                self.plc_conn.Write(self.break_tag, break_l)
-                self.plc_conn.Write(self.crack_tag, crack_l)
-                self.plc_conn.Write(self.current_tag, e_current)
-                logging.debug("Write to PLC Serial=%s Stroke=%s ECurrent=%s Break=%s Crack=%s",
-                    self.ident, self.stroke,
-                    e_current, break_l, crack_l
-                )
-        elif self.type_tag == "manual":
-            def write():
-                self.plc_conn.Write(self.break_tag, break_l)
-                self.plc_conn.Write(self.crack_tag, crack_l)
-                self.plc_conn.Write(f"QASS_Measurement_{self.stroke}", e_current)
-                logging.debug("Write to PLC Serial=%s Stroke=%s ECurrent=%s Break=%s Crack=%s",
-                    self.ident, self.stroke,
-                    e_current, break_l, crack_l
-                )
+
+        # The tag is resolved inside the executor call (as it always was), so a
+        # manual-mode stroke number is read at the moment of the write.
+        if self.qass_type == "auto":
+            def measurement_tag() -> str | None:
+                return self.current_tag
+        elif self.qass_type == "manual":
+            def measurement_tag() -> str | None:
+                return f"QASS_Measurement_{self.stroke}"
         else:
-            raise ValueError(
-                f"Unsupported qass type: {self.type_tag}"
+            raise ValueError(f"Unsupported qass type: {self.qass_type}")
+
+        def write() -> None:
+            self.plc_conn.Write(self.break_tag, break_limit)
+            self.plc_conn.Write(self.crack_tag, crack_limit)
+            self.plc_conn.Write(measurement_tag(), e_current)
+            logging.debug(
+                "Write to PLC Serial=%s Stroke=%s ECurrent=%s Break=%s Crack=%s",
+                self.ident, self.stroke,
+                e_current, break_limit, crack_limit,
             )
-        
+
         await self._plc_call(write)
-        
+
         elapsed_ms = (time.perf_counter() - start) * 1000
         self.metrics.last_plc_write_ms = elapsed_ms
-        logging.debug("PLC write took %.1f ms",    elapsed_ms)
+        logging.debug("PLC write took %.1f ms", elapsed_ms)
         self.metrics.mark_plc_success()
 
-    async def _ident_loop(self):
-        # Periodically read serial number from PLC
-        def read_sn():
-            return self.plc_conn.Read(self.sn_tag)
+    async def _serial_loop(self) -> None:
+        """Read the serial tag every second; a new non-empty serial restarts at stroke 1."""
+
+        def read_serial() -> Any:
+            return self.plc_conn.Read(self.serial_tag)
 
         while not self.shutdown_flag:
             try:
-                r = await self._plc_call(read_sn)
-                
-                if r.Status == "Success":
-                    sn = r.Value
+                response = await self._plc_call(read_serial)
+
+                if response.Status == "Success":
+                    serial = response.Value
                     self.metrics.mark_plc_success()
-                    if sn and sn != self.ident:
-                        self.ident = sn
+                    if serial and serial != self.ident:
+                        self.ident = serial
                         self.stroke = 1
                         self.stroke_buffer.clear()
                         self.state.save(self.ident, self.stroke, [])
-                        logging.info("SN Tag Read: Value=%s", sn)
+                        logging.info("SN Tag Read: Value=%s", serial)
             except Exception as e:
                 logging.error("PLC ident error: %s", e)
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(SERIAL_POLL_SEC)
 
     # ---------- Watchdogs ----------
-    
-    async def _plc_watchdog(self):
-        # Detect PLC communication loss
+
+    async def _plc_watchdog(self) -> None:
+        """Flag PLC comms as lost after PLC_COMMS_TIMEOUT_SEC without success."""
         while not self.shutdown_flag:
-            if time.time() - self.last_plc_ok > 10:
+            if time.time() - self.last_plc_ok > PLC_COMMS_TIMEOUT_SEC:
                 logging.error("PLC WATCHDOG: no successful comms")
                 self.metrics.plc_connected = False
             else:
                 self.metrics.plc_connected = True
-            await asyncio.sleep(2)
+            await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
 
-    async def _qass_watchdog(self):
-        # Detect QASS communication or data loss
+    async def _qass_watchdog(self) -> None:
+        """Set the error code from QASS state; exit if QASS has gone silent."""
         while not self.shutdown_flag:
             now = time.time()
-            
+
             if not self.qass_connected:
                 self.last_error_code = ERROR_QASS_DISCONNECTED
                 self.metrics.mark_error(ERROR_QASS_DISCONNECTED)
-            elif now - self.last_qass_data > 10:
+            elif now - self.last_qass_data > QASS_NO_DATA_SEC:
                 self.last_error_code = ERROR_QASS_NO_DATA
                 self.metrics.mark_error(ERROR_QASS_NO_DATA)
             else:
                 self.last_error_code = ERROR_NONE
-            self.check_qass_disconnect_and_exit()
-            await asyncio.sleep(2)
-         
-    def check_qass_disconnect_and_exit(self):
-        timeout = self.cfg["qass"].get("disconnect_timeout_sec", 60)
+            self._exit_if_qass_silent()
+            await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
+
+    def _exit_if_qass_silent(self) -> None:
+        """Exit with code 1 (Docker restarts the container) when no QASS message
+        of any kind has arrived for ``disconnect_timeout_sec``. Never fires before
+        the first message."""
+        timeout = self.disconnect_timeout_sec
         last_msg = self.metrics.last_qass_message_ts
 
         if last_msg is None:
@@ -399,47 +439,50 @@ class AsyncWorker:
         if time.time() - last_msg > timeout:
             logging.error(
                 "QASS disconnected for %s seconds → exiting container",
-                timeout
+                timeout,
             )
-            # Clean exit → Docker will restart
             sys.exit(1)
 
-    # ---------- Heartbeat / Health ----------
+    # ---------- Heartbeat / health ----------
 
-    async def _heartbeat(self):
-        # Periodic heartbeat and PLC status update
+    async def _heartbeat(self) -> None:
+        """Toggle the heartbeat and write the status tags every 5 s."""
         while not self.shutdown_flag:
-            self.hb_value ^= 1
+            self.heartbeat_value ^= 1
 
             if self.plc_writes_enabled:
                 await self._write_plc_status()
 
-            # logging.info("Heartbeat OK")
-            await asyncio.sleep(5)
+            await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
 
-    async def _write_plc_status(self):
-        # Write heartbeat and status tags to PLC
-        def write():
-            self.plc_conn.Write(self.heartbeat_tag, self.hb_value)
+    async def _write_plc_status(self) -> None:
+        """Write heartbeat and status tags, in this order, in one PLC transaction."""
+
+        def write() -> None:
+            self.plc_conn.Write(self.heartbeat_tag, self.heartbeat_value)
             self.plc_conn.Write(self.service_ok_tag, True)
             self.plc_conn.Write(self.qass_ok_tag, self.qass_connected)
-            self.plc_conn.Write(self.plc_ok_tag, time.time() - self.last_plc_ok < 10)
+            self.plc_conn.Write(
+                self.plc_ok_tag, time.time() - self.last_plc_ok < PLC_COMMS_TIMEOUT_SEC
+            )
             self.plc_conn.Write(self.last_stroke_tag, self.stroke)
             self.plc_conn.Write(self.error_code_tag, self.last_error_code)
 
         await self._plc_call(write)
 
-    async def _health_server(self):
-        # HTTP health endpoint
-        async def health(_):
+    async def _health_server(self) -> None:
+        """Start the HTTP server on 0.0.0.0:health.port (returns once listening)."""
+
+        async def health(_request: web.Request) -> web.Response:
+            # Always 200: the Docker HEALTHCHECK only checks that the process answers.
             return web.json_response({
                 "status": "ok",
                 "qass_connected": self.qass_connected,
                 "last_qass_data_s": int(time.time() - self.last_qass_data),
                 "serial": self.ident,
-            })    
-        async def _metrics(request):
-            
+            })
+
+        async def metrics(_request: web.Request) -> web.Response:
             healthy = True
             reason = "OK"
 
@@ -458,24 +501,21 @@ class AsyncWorker:
                 },
                 status=200 if healthy else 503,
             )
-        async def _logs_handler(request):
-            logfile = LOG_DIR / os.getenv(
-                "QASS_LOG_FILE",
-                "qass.log"
-            )
+
+        async def logs(_request: web.Request) -> web.Response:
+            logfile = LOG_DIR / os.getenv("QASS_LOG_FILE", "qass.log")
 
             with open(logfile, "r") as f:
-                lines = f.readlines()[-100:]
+                lines = f.readlines()[-LOG_TAIL_LINES:]
 
-            return web.json_response({
-                "logs": lines
-            })
+            return web.json_response({"logs": lines})
+
         app = web.Application()
-        app.add_routes([web.get("/health", health)])   
-        app.add_routes([web.get("/metrics", _metrics)])
-        app.add_routes([web.get("/logs", _logs_handler)])
+        app.add_routes([
+            web.get("/health", health),
+            web.get("/metrics", metrics),
+            web.get("/logs", logs),
+        ])
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", port=self.health_port).start()
-    
-    
