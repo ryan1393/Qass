@@ -18,7 +18,8 @@ runs per machine (`qass-machine1` … `qass-machine4`).
    buffered. On the first non-measuring record with a non-empty buffer it takes
    the sample with the highest `e_current` (first one wins on ties) and uses its
    `e_current`, `limitbreak`, `limitcrack` (ints, default 0). It writes them to the
-   PLC, then increments the stroke counter. This happens even if the PLC write
+   PLC, then increments the stroke counter. A stroke still measuring after 60 s
+   is finished the same way, with a warning, and later samples start a new stroke. This happens even if the PLC write
    fails, which is logged. Records whose numeric fields are not convertible with
    `int()` are logged and skipped.
 4. Reads the part serial (`plc.serial_tag`) every second. A new non-empty serial

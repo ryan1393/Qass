@@ -473,3 +473,47 @@ async def test_serial_change_during_stroke_write_keeps_stroke_number(run_service
         (BREAK_TAG, 4), (CRACK_TAG, 4), ("QASS_Measurement_1", 44),  # SN2 stroke 1
     ]
 
+
+
+@pytest.mark.parametrize("qass_type", ["auto", "manual"])
+async def test_stroke_is_finished_after_60s_of_continuous_measuring(
+        run_service, plc, qass, clock, caplog, qass_type):
+    """Cap: if "measuring" never ends, the stroke is finished after 60 s
+    (peak so far written, counter advanced) instead of buffering forever."""
+    caplog.set_level("INFO")
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port(), qass_type=qass_type)) as svc:
+        await ready(svc, qass)
+        # one sample every 2 s for 70 s, never a measuring=false
+        for i in range(36):
+            await qass.send_records(rec("true", 100 + i, 0, i, i), gap=0)
+            await clock.sim_sleep(2)
+        await wait_until(lambda: len(measurement_writes(plc)) == 3)
+        assert svc.worker.stroke == 2
+        capped = measurement_writes(plc)[-1][1]
+        assert 125 <= capped <= 135          # peak of the first ~60 s of samples
+        assert 0 < len(svc.worker.stroke_buffer) < 10  # later samples: new stroke
+
+        await qass.send_records(rec("false"))
+        await wait_until(lambda: len(measurement_writes(plc)) == 6)
+        assert svc.worker.stroke == 3
+
+    tag = CURRENT_TAG if qass_type == "auto" else "QASS_Measurement_1"
+    assert measurement_writes(plc)[2] == (tag, capped)
+    assert measurement_writes(plc)[-1][1] == 135   # the rest, as stroke 2
+    assert caplog.text.count("still measuring after 60 s") == 1
+
+
+async def test_normal_strokes_are_not_capped(run_service, plc, qass, clock, caplog):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await ready(svc, qass)
+        for _ in range(2):   # two 50 s strokes with a pause: neither reaches 60 s
+            for i in range(25):
+                await qass.send_records(rec("true", i, 0, 1, 1), gap=0)
+                await clock.sim_sleep(2)
+            await qass.send_records(rec("false"))
+            await clock.sim_sleep(20)
+        await wait_until(lambda: len(measurement_writes(plc)) == 6)
+        assert svc.worker.stroke == 3
+    assert "still measuring" not in caplog.text

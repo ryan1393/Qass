@@ -64,6 +64,7 @@ PLC_COMMS_TIMEOUT_SEC = 10  # plc_ok is False after this long without a successf
 PLC_ERROR_HOLD_SEC = 10  # error code stays PLC_COMMS this long after a failed PLC call
 
 STATE_SAVE_EVERY = 25  # persist the stroke buffer every N samples
+MAX_STROKE_SEC = 60  # a stroke still "measuring" after this long is finished anyway
 LOG_TAIL_LINES = 100  # lines returned by /logs
 HTTP_BIND_RETRY_SEC = 10  # retry interval while health.port cannot be bound
 
@@ -186,6 +187,7 @@ class AsyncWorker:
         self.state = StrokeStateStore(state_path)
         self.ident, self.stroke, self.stroke_buffer = self.state.load()
         self.serial_epoch = 0  # bumped on every serial change
+        self.stroke_started = monotonic()  # monotonic time of the stroke's first sample
 
         # PLC watchdog tracking
         self.last_plc_ok = monotonic()
@@ -351,8 +353,9 @@ class AsyncWorker:
                     logging.exception("Failed to process QASS record: %r", record)
 
     async def _process_record(self, record: dict) -> None:
-        """Buffer samples while measuring; on the first non-measuring record,
-        write the sample with the highest e_current to the PLC."""
+        """Buffer samples while measuring; on the first non-measuring record (or
+        after MAX_STROKE_SEC of measuring), write the sample with the highest
+        e_current to the PLC."""
         if not isinstance(record, dict):
             logging.warning("Skipping QASS record that is not a JSON object: %r", record)
             return
@@ -370,14 +373,28 @@ class AsyncWorker:
                 )
                 return
             self.stroke_buffer.append(record)
+            if len(self.stroke_buffer) == 1:
+                self.stroke_started = monotonic()
             if len(self.stroke_buffer) % STATE_SAVE_EVERY == 0:
                 self.state.save(self.ident, self.stroke, self.stroke_buffer)
+            if monotonic() - self.stroke_started >= MAX_STROKE_SEC:
+                # "measuring" never ended: do not buffer forever.
+                logging.warning(
+                    "Serial=%s Stroke=%s still measuring after %s s (%s samples): "
+                    "finishing the stroke now",
+                    self.ident, self.stroke, MAX_STROKE_SEC, len(self.stroke_buffer),
+                )
+                await self._finish_stroke()
             return
 
         # End-of-stroke without data: nothing to report
         if not self.stroke_buffer:
             return
 
+        await self._finish_stroke()
+
+    async def _finish_stroke(self) -> None:
+        """Write the buffered stroke's peak sample to the PLC and start the next stroke."""
         # Peak sample (first one wins on ties)
         peak = max(self.stroke_buffer, key=lambda x: int(x.get("e_current", 0)))
 
