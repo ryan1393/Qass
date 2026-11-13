@@ -435,3 +435,41 @@ async def test_non_measuring_object_in_same_read_is_ignored(run_service, plc, qa
         await wait_until(lambda: len(measurement_writes(plc)) == 3)
     assert measurement_writes(plc) == [(BREAK_TAG, 2), (CRACK_TAG, 2), (CURRENT_TAG, 20)]
 
+
+async def test_serial_change_during_stroke_write_keeps_stroke_number(run_service, plc, qass, clock):
+    """Fixed race: a new serial read while a finished stroke waited for the PLC
+    lock used to send that stroke to QASS_Measurement_1 and make the new part's
+    first stroke number 2."""
+    import threading
+
+    plc.tags[SERIAL_TAG] = "SN1"
+    cfg = make_cfg(qass.port, free_port(), qass_type="manual")
+    async with run_service(cfg) as svc:
+        await ready(svc, qass)
+        for _ in range(2):
+            await qass.send_records(rec("true", 10, 0, 1, 1), rec("false"))
+        await wait_until(lambda: svc.worker.stroke == 3)
+        await qass.send_records(rec("true", 33, 0, 3, 3))
+        await wait_until(lambda: len(svc.worker.stroke_buffer) == 1)
+
+        # a serial read is in flight (holding the PLC lock) when the new serial lands
+        plc.read_gate = threading.Event()
+        plc.tags[SERIAL_TAG] = "SN2"
+        await wait_until(lambda: plc.blocked_reads == 1)
+        await qass.send_records(rec("false"))   # stroke 3 ends, write waits for lock
+        await clock.real_sleep(0.05)
+        plc.read_gate.set()
+
+        await wait_until(lambda: len(measurement_writes(plc)) == 9)
+        await wait_until(lambda: svc.worker.ident == "SN2")
+        await clock.sim_sleep(1)
+        assert svc.worker.stroke == 1           # new part starts at 1
+
+        await qass.send_records(rec("true", 44, 0, 4, 4), rec("false"))
+        await wait_until(lambda: len(measurement_writes(plc)) == 12)
+
+    assert measurement_writes(plc)[6:] == [
+        (BREAK_TAG, 3), (CRACK_TAG, 3), ("QASS_Measurement_3", 33),  # SN1 stroke 3
+        (BREAK_TAG, 4), (CRACK_TAG, 4), ("QASS_Measurement_1", 44),  # SN2 stroke 1
+    ]
+

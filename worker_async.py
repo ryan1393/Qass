@@ -179,6 +179,7 @@ class AsyncWorker:
         # Persistent stroke state
         self.state = StrokeStateStore(state_path)
         self.ident, self.stroke, self.stroke_buffer = self.state.load()
+        self.serial_epoch = 0  # bumped on every serial change
 
         # PLC watchdog tracking
         self.last_plc_ok = time.time()
@@ -377,26 +378,35 @@ class AsyncWorker:
         break_limit = int(peak.get("limitbreak", 0))
         crack_limit = int(peak.get("limitcrack", 0))
 
+        # Pin the stroke to the part it was measured on. The write below waits
+        # for the PLC lock, and a new serial may be read in the meantime.
+        ident, stroke, serial_epoch = self.ident, self.stroke, self.serial_epoch
+
         logging.info(
             "Serial=%s Stroke=%s ECurrent=%s EMax=%s Break=%s Crack=%s",
-            self.ident, self.stroke,
+            ident, stroke,
             e_current, e_max, break_limit, crack_limit,
         )
 
         try:
-            await self._write_plc(e_current, break_limit, crack_limit)
+            await self._write_plc(e_current, break_limit, crack_limit, ident, stroke)
         except Exception:
             # The stroke happened even if the PLC write failed: still advance the
             # counter so later strokes keep their own numbers.
             logging.exception(
                 "PLC measurement write failed: Serial=%s Stroke=%s",
-                self.ident, self.stroke,
+                ident, stroke,
             )
+
+        self.metrics.mark_stroke_processed()
+        if self.serial_epoch != serial_epoch:
+            # A new part arrived during the write; the serial loop already
+            # reset the counter to 1 for it. Do not advance it.
+            return
 
         # Prepare for the next stroke
         self.stroke_buffer.clear()
         self.stroke += 1
-        self.metrics.mark_stroke_processed()
         self.state.save(self.ident, self.stroke, [])
 
     # ---------- PLC interaction ----------
@@ -464,21 +474,29 @@ class AsyncWorker:
         self.last_plc_error_ts = time.time()
         self.metrics.mark_error(ERROR_PLC_COMMS)
 
-    async def _write_plc(self, e_current: int, break_limit: int, crack_limit: int) -> None:
-        """Write one stroke result. Order: break, crack, then the measurement tag."""
+    async def _write_plc(
+        self,
+        e_current: int,
+        break_limit: int,
+        crack_limit: int,
+        ident: Any = None,
+        stroke: int | None = None,
+    ) -> None:
+        """Write one stroke result. Order: break, crack, then the measurement tag.
+
+        ``ident``/``stroke`` identify the stroke being written (default: current).
+        """
+        if stroke is None:
+            ident, stroke = self.ident, self.stroke
         start = time.perf_counter()
         if not self.plc_writes_enabled:
             logging.info("PLC writes disabled — skipping measurement write")
             return
 
-        # The tag is resolved inside the executor call (as it always was), so a
-        # manual-mode stroke number is read at the moment of the write.
         if self.qass_type == "auto":
-            def measurement_tag() -> str | None:
-                return self.current_tag
+            measurement_tag = self.current_tag
         elif self.qass_type == "manual":
-            def measurement_tag() -> str | None:
-                return f"QASS_Measurement_{self.stroke}"
+            measurement_tag = f"QASS_Measurement_{stroke}"
         else:
             raise ValueError(f"Unsupported qass type: {self.qass_type}")
 
@@ -486,11 +504,11 @@ class AsyncWorker:
             responses = [
                 self.plc_conn.Write(self.break_tag, break_limit),
                 self.plc_conn.Write(self.crack_tag, crack_limit),
-                self.plc_conn.Write(measurement_tag(), e_current),
+                self.plc_conn.Write(measurement_tag, e_current),
             ]
             logging.debug(
                 "Write to PLC Serial=%s Stroke=%s ECurrent=%s Break=%s Crack=%s",
-                self.ident, self.stroke,
+                ident, stroke,
                 e_current, break_limit, crack_limit,
             )
             return responses
@@ -508,7 +526,7 @@ class AsyncWorker:
         if rejected:
             logging.error(
                 "PLC measurement write not confirmed: Serial=%s Stroke=%s %s",
-                self.ident, self.stroke, ", ".join(rejected),
+                ident, stroke, ", ".join(rejected),
             )
 
     async def _serial_loop(self) -> None:
@@ -526,6 +544,7 @@ class AsyncWorker:
                     self.metrics.mark_plc_success()
                     if serial and serial != self.ident:
                         self.ident = serial
+                        self.serial_epoch += 1
                         self.stroke = 1
                         self.stroke_buffer.clear()
                         self.state.save(self.ident, self.stroke, [])

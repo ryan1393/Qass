@@ -107,6 +107,8 @@ class PlcSim:
     # return an error Status (what real pylogix does when the PLC is unreachable)
     status_fail: bool = False
     write_delay: float = 0.0005  # real seconds; widens race windows
+    read_gate: Any = None  # threading.Event: Read() blocks until it is set
+    blocked_reads: int = 0
     instances: int = 0
     max_inflight: int = 0
     _inflight: int = 0
@@ -160,6 +162,10 @@ class PlcSim:
                 try:
                     sim._record("read", tag, None, self._id)
                     time.sleep(sim.write_delay)
+                    gate = sim.read_gate
+                    if gate is not None and not gate.is_set():
+                        sim.blocked_reads += 1
+                        gate.wait(5)
                     if sim.fail_all or sim.fail_reads > 0:
                         sim.fail_reads = max(0, sim.fail_reads - 1)
                         sim.calls[-1].failed = True
