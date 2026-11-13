@@ -26,6 +26,7 @@ COPY state_store.py .
 COPY qass_normalizer.py .
 COPY metrics.py .
 COPY paths.py .
+COPY config.py .
 
 # Copy configs into image
 COPY configs/ configs/

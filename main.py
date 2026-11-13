@@ -2,24 +2,20 @@ import sys
 import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
-import yaml
 import os
 from worker_async import AsyncWorker
-from pathlib import Path
+from config import ConfigError, load_config, resolve_config_path
 from paths import LOG_DIR
-from paths import CONFIG_DIR
 
 async def main():
     # Allow config file to be passed via CLI (Docker / systemd safe)
-    
-    config_arg = sys.argv[1] if len(sys.argv) > 1 else "configs/default.yaml"
-    config_path = Path(config_arg)
-    
-    if not config_path.is_absolute():
-        config_path = CONFIG_DIR / config_path.name
+    config_path = resolve_config_path(sys.argv[1] if len(sys.argv) > 1 else None)
 
-    with open(config_path, "r") as f:
-        cfg = yaml.safe_load(f)
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as e:
+        logging.critical("Invalid config: %s", e)
+        raise SystemExit(1)
 
     shutdown_event = asyncio.Event()
     worker = AsyncWorker(cfg)

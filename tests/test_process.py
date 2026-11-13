@@ -136,3 +136,14 @@ async def test_exit_on_silence_logging_and_plc_writes(tmp_path, qass):
     assert "QASS disconnected for 2 seconds → exiting container" in text
     first = text.splitlines()[0]
     assert LINE_RE.match(first), first
+
+
+async def test_invalid_config_exits_with_clear_message(tmp_path, qass):
+    cfg = make_cfg(qass.port, free_port())
+    del cfg["plc"]["serial_tag"]
+    app, proc, out, log_path = await run_main(tmp_path, qass, cfg, "bad.yaml", "bad.yaml")
+    code = await asyncio.wait_for(proc.wait(), timeout=20)
+    console = (await proc.stdout.read()).decode()
+    assert code == 1
+    assert "Invalid config:" in console and "plc.serial_tag" in console
+    assert "Traceback" not in console
