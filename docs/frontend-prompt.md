@@ -40,15 +40,14 @@ Machines 1 and 2 are `manual` type; machines 3 and 4 are `auto`.
 - Error codes: 0 NONE, 10 QASS_DISCONNECTED, 11 QASS_NO_DATA, 20 PLC_COMMS.
 - `last_error_ts` is Unix seconds (float) or null.
 
-**GET /logs**: `{"logs": ["<line>\n", ...]}`, the last 100 lines. Returns HTTP 500 if the log file doesn't exist yet; show "no logs yet".
+**GET /logs**: `{"logs": ["<line>\n", ...]}`, the last 100 lines. An empty list means no logs yet; older builds return HTTP 500 instead, so handle both.
 - Line format: `2026-11-13 08:15:02,123 INFO root <message>`.
 - Stroke lines look exactly like `Serial=SN1 Stroke=4 ECurrent=30 EMax=120 Break=510 Crack=410`.
 
-**Known quirks; don't build features on these fields:**
-- `metrics.qass_connected` never goes back to false. Use the top-level `healthy`/`reason` and `/health.qass_connected` instead.
-- `metrics.qass_generation` is always 0.
-- `plc_queue_depth` is always 0.
-- `metrics.plc_connected` doesn't detect an unreachable PLC (a known bug). Label it "PLC comms (unverified)".
+**Notes:**
+- `plc_queue_depth` is always 0; ignore it.
+- `metrics.plc_connected` becomes false after 10 s without a reachable PLC.
+- Error code 20 means a PLC call failed in the last 10 s.
 
 ## Backend (NestJS)
 - A `qass` module. Machine list from config/env (`QASS_HOST` plus a name→port map, defaulting to the 4 machines above), following RyanWRLD's config pattern.
@@ -61,7 +60,7 @@ Machines 1 and 2 are `manual` type; machines 3 and 4 are `auto`.
   - `GET /api/qass/machines/:name/logs`: raw lines and parsed strokes.
 - Live updates over SSE or WebSocket, whichever RyanWRLD already uses; otherwise the frontend polls every 5 s.
 - The browser never calls the QASS ports directly (no CORS, internal IPs).
-- Unit tests: mock the QASS HTTP responses, including 503 with a body, timeouts, 500 from /logs, and a `null` serial.
+- Unit tests: mock the QASS HTTP responses, including 503 with a body, timeouts, an empty or 500 /logs, and a `null` serial.
 
 ## Frontend (Angular + dana-ui)
 - **Overview:** one card per machine, showing:

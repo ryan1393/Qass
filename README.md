@@ -11,14 +11,16 @@ runs per machine (`qass-machine1` … `qass-machine4`).
 
 1. Connects to `qass.ip:qass.port` and sends exactly
    `{"cmd":"sendreadings","p1":"true"}`.
-2. Queues only socket reads that contain `"measuring"`. Each read is parsed as
-   JSON; concatenated objects (`{..}{..}`) are split; unparseable reads are dropped.
+2. Reassembles complete JSON records from the TCP stream: a record may be split
+   across socket reads, or several may arrive in one read. Only records that
+   contain `"measuring"` are queued; unparseable data is dropped.
 3. While `measuring` is `"true"` (case-insensitive string compare) records are
    buffered. On the first non-measuring record with a non-empty buffer it takes
    the sample with the highest `e_current` (first one wins on ties) and uses its
    `e_current`, `limitbreak`, `limitcrack` (ints, default 0). It writes them to the
-   PLC, then increments the stroke counter. Records whose numeric fields are not
-   convertible with `int()` are logged and skipped.
+   PLC, then increments the stroke counter. This happens even if the PLC write
+   fails, which is logged. Records whose numeric fields are not convertible with
+   `int()` are logged and skipped.
 4. Reads the part serial (`plc.serial_tag`) every second. A new non-empty serial
    resets the stroke counter to 1 and drops any half-finished stroke.
 5. Writes a heartbeat and status tags every 5 s.
@@ -51,6 +53,11 @@ status), but the serial is still read.
 
 All PLC calls are serialized by one lock and run in a thread-pool executor. If a
 call raises, the PLC object is closed and recreated and the error re-raised.
+pylogix reports an unreachable PLC as a `Status` string (for example
+`Connection failure` or `Unknown error [Errno 111] …`) rather than an exception.
+Such calls are treated as failed: they don't refresh `plc_ok`, and they set error
+20. Tag errors such as `Path destination unknown` still count as "PLC reachable".
+A failed heartbeat or measurement write is logged and the service carries on.
 
 ### Error codes (`error_code_tag`, `/metrics`)
 
@@ -59,7 +66,9 @@ call raises, the PLC object is closed and recreated and the error re-raised.
 | 0 | `NONE` | OK |
 | 10 | `QASS_DISCONNECTED` | no TCP connection to QASS |
 | 11 | `QASS_NO_DATA` | connected, but no `measuring` data for 10 s |
-| 20 | `PLC_COMMS` | a PLC call raised (re-evaluated by the QASS watchdog every 2 s) |
+| 20 | `PLC_COMMS` | a PLC call failed (raised or unreachable) in the last 10 s |
+
+The code is re-evaluated every 2 s. Priority: 10 > 11 > 20 > 0.
 
 ## Configuration
 
@@ -108,7 +117,7 @@ after each stroke, so the counter survives restarts and rebuilds.
 |---|---|---|
 | `GET /health` | always 200 | `status`, `qass_connected`, `last_qass_data_s`, `serial` |
 | `GET /metrics` | 200, or 503 when QASS is disconnected | `healthy`, `reason`, `metrics` (`uptime_seconds`, `qass_connected`, `qass_generation`, `plc_connected`, `strokes_processed`, `error_count`, `last_error_code`, `last_error_name`, `last_error_ts`, `error_counts`), `qass_queue_depth`, `plc_queue_depth` (always 0), `last_plc_write_ms` |
-| `GET /logs` | 200 | `{"logs": [last 100 lines]}` |
+| `GET /logs` | 200 | `{"logs": [last 100 lines]}` (`[]` if the file doesn't exist yet) |
 
 Ports: machine1 8081, machine2 8082, machine3 8083, machine4 8084.
 
@@ -166,22 +175,14 @@ to tags, IPs or ports fails the run.
 
 ## Known issues (not fixed yet)
 
-Each item below has a strict-`xfail` test unless noted otherwise.
-
-- **A record split across two TCP reads is lost.** Every 12000-byte read is
-  parsed on its own. If a JSON object straddles two reads, both halves fail to
-  parse and are dropped, together with any complete records in the same read.
-  A lost end-of-stroke record merges two strokes into one.
-- **pylogix returns an error `Status` instead of raising when the PLC is
-  unreachable.** The service counts that as a successful call, so `plc_ok`,
-  `/metrics plc_connected` and the PLC watchdog do not notice a dead PLC.
-- **One raising PLC call stops the heartbeat task**, and one raising
-  measurement write stops stroke processing. `/health` keeps returning 200.
-- Error code 20 (`PLC_COMMS`) is overwritten by the QASS watchdog within 2 s,
-  so the PLC rarely sees it. (no test)
-- `/metrics` → `metrics.qass_connected` never goes back to `false`, and
-  `metrics.qass_generation` is always 0. The top-level `healthy` and `reason`
-  are correct. (no test)
-- After a receive error the old QASS socket is dropped without being closed.
-  (no test)
-- `/logs` returns HTTP 500 if the log file does not exist yet. (no test)
+- `configs/default.yaml` is `type: auto` without `plc.current_tag`, so it does
+  not start. Production does not use it.
+- Manual mode: if a new serial is read while a stroke's write is waiting for the
+  PLC lock (a window of milliseconds), that stroke is written to
+  `QASS_Measurement_1`, and the new part's first stroke becomes 2.
+- When the PLC host is down, each pylogix call can block for its 5 s socket
+  timeout. One heartbeat (6 writes) can then hold the PLC lock for up to 30 s,
+  and serial reads and measurement writes wait behind it.
+- A measurement write that fails is not retried, so that stroke's values never
+  reach the PLC (it is logged).
+- The HTTP endpoints have no authentication and listen on all interfaces.
