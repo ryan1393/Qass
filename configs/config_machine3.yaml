@@ -1,0 +1,34 @@
+qass:
+  ip: 10.16.82.99
+  port: 17000
+  type: auto
+  disconnect_timeout_sec: 30   # ⏱️ REQUIRED for auto-restart
+
+plc:
+  ip: 10.16.82.70
+
+  # READ TAGS
+  serial_tag: PROGRAM:PC_COMM.COM_TT200_From_PC.Serial_Num
+
+  # WRITE TAGS (defined but disabled) 
+  break_tag: PROGRAM:PC_COMM.COM_TT200_From_PC.Break_Limit
+  crack_tag: PROGRAM:PC_COMM.COM_TT200_From_PC.Crack_Limit
+  current_tag: PROGRAM:PC_COMM.COM_TT250_From_PC.Qass_Measurement
+  # current_tag: Dana_Qass_Measurement
+
+  heartbeat_tag: "QASS_Heartbeat"
+  service_ok_tag: "QASS_ServiceOK"
+  qass_ok_tag: "QASS_QassConnected"
+  plc_ok_tag: "QASS_PlcCommOK"
+  last_stroke_tag: "QASS_LastStroke"
+  error_code_tag: "QASS_LastErrorCode"
+
+  # 🔴 MASTER SWITCH
+  enable_writes: true
+
+health:
+  port: 8083
+
+reconnect:
+  initial_delay: 1
+  max_delay: 30

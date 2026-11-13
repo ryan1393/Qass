@@ -1,0 +1,8 @@
+# Allen-Bradley PLC communication library
+pylogix
+
+# Async HTTP server for health endpoint
+aiohttp
+
+# YAML parsing for configuration
+pyyaml

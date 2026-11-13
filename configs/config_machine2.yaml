@@ -1,0 +1,32 @@
+qass:
+  ip: 10.16.81.150
+  port: 17000
+  type: manual
+  disconnect_timeout_sec: 30   # ⏱️ REQUIRED for auto-restart
+
+plc:
+  ip: 10.16.81.236
+
+  # READ TAGS
+  serial_tag: HMI_LAST_SCAN_PROCESS
+
+  # WRITE TAGS (defined but disabled) 
+  break_tag: QASS_Break_Limit
+  crack_tag: QASS_Crack_Limit
+
+  heartbeat_tag: "QASS_Heartbeat"
+  service_ok_tag: "QASS_ServiceOK"
+  qass_ok_tag: "QASS_QassConnected"
+  plc_ok_tag: "QASS_PlcCommOK"
+  last_stroke_tag: "QASS_LastStroke"
+  error_code_tag: "QASS_LastErrorCode"
+
+  # 🔴 MASTER SWITCH
+  enable_writes: true
+
+health:
+  port: 8082
+
+reconnect:
+  initial_delay: 1
+  max_delay: 30

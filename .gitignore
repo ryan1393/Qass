@@ -1,0 +1,12 @@
+# Runtime data (stroke state and logs live on the server, not in Git)
+state.db
+state/
+logs/
+*.log
+
+# Python build output
+__pycache__/
+*.pyc
+
+# Local secrets, if ever added
+.env
