@@ -172,3 +172,35 @@ async def test_logs_short_file_and_bad_bytes(run_service, plc, qass, monkeypatch
     assert status == 200
     assert body == {"logs": ["a\n", "\ufffd b\n", "c"]}
 
+
+async def test_health_port_in_use_keeps_service_running_and_retries(
+        run_service, plc, qass, clock, caplog):
+    """The HTTP task used to die silently when health.port was taken, leaving
+    the service without /health for good. Now it logs CRITICAL once, keeps
+    doing the QASS/PLC work, and binds as soon as the port is free."""
+    import socket
+
+    from conftest import BREAK_TAG
+
+    caplog.set_level("INFO")
+    plc.tags[SERIAL_TAG] = "SN7"
+    blocker = socket.socket()
+    blocker.bind(("0.0.0.0", 0))
+    blocker.listen()
+    port = blocker.getsockname()[1]
+    try:
+        async with run_service(make_cfg(qass.port, port)) as svc:
+            await wait_until(lambda: "Cannot serve HTTP on 0.0.0.0" in caplog.text)
+            await qass.wait_connections(1)
+            await wait_until(lambda: svc.worker.ident == "SN7")
+            await qass.send_records(rec("true", 3, 0, 1, 1), rec("false"))
+            await wait_until(lambda: (BREAK_TAG, 1) in plc.writes())  # still working
+            await clock.sim_sleep(25)
+            blocker.close()
+            await wait_until(lambda: "HTTP server listening" in caplog.text, timeout=5)
+            status, body = await get(port, "/health")
+            assert status == 200 and body["serial"] == "SN7"
+    finally:
+        blocker.close()
+    assert caplog.text.count("Cannot serve HTTP on 0.0.0.0") == 1
+

@@ -60,6 +60,7 @@ PLC_ERROR_HOLD_SEC = 10  # error code stays PLC_COMMS this long after a failed P
 
 STATE_SAVE_EVERY = 25  # persist the stroke buffer every N samples
 LOG_TAIL_LINES = 100  # lines returned by /logs
+HTTP_BIND_RETRY_SEC = 10  # retry interval while health.port cannot be bound
 
 
 # pylogix reports comms problems through Response.Status instead of raising.
@@ -666,7 +667,9 @@ class AsyncWorker:
         await self._plc_call(write)
 
     async def _health_server(self) -> None:
-        """Start the HTTP server on 0.0.0.0:health.port (returns once listening)."""
+        """Start the HTTP server on 0.0.0.0:health.port (returns once listening).
+
+        If the port cannot be bound, log it and retry every HTTP_BIND_RETRY_SEC."""
 
         async def health(_request: web.Request) -> web.Response:
             # Always 200: the Docker HEALTHCHECK only checks that the process answers.
@@ -719,4 +722,21 @@ class AsyncWorker:
         ])
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
-        await web.TCPSite(runner, "0.0.0.0", port=self.health_port).start()
+        failed = False
+        while not self.shutdown_flag:
+            try:
+                await web.TCPSite(runner, "0.0.0.0", port=self.health_port).start()
+            except OSError as e:
+                # Keep doing the QASS/PLC job; Docker shows the container as
+                # unhealthy until HTTP is up. Retry until the port is free.
+                if not failed:
+                    logging.critical(
+                        "Cannot serve HTTP on 0.0.0.0:%s: %s (retrying every %s s)",
+                        self.health_port, e, HTTP_BIND_RETRY_SEC,
+                    )
+                failed = True
+                await asyncio.sleep(HTTP_BIND_RETRY_SEC)
+                continue
+            if failed:
+                logging.info("HTTP server listening on 0.0.0.0:%s", self.health_port)
+            return

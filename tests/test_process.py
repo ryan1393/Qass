@@ -182,4 +182,3 @@ async def test_no_argument_without_default_yaml_exits_cleanly(tmp_path, qass):
     assert code == 1
     assert "Invalid config:" in console and "default.yaml: config file not found" in console
     assert "Traceback" not in console
-
