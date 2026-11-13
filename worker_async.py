@@ -476,11 +476,7 @@ class AsyncWorker:
         app.add_routes([web.get("/health", health)])   
         app.add_routes([web.get("/metrics", _metrics)])
         app.add_routes([web.get("/logs", _logs_handler)])
-        runner = web.AppRunner(app)
-        runner = web.AppRunner(
-            app,
-            access_log=None
-        )
+        runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         logging.info(self.cfg)
         await web.TCPSite(runner, "0.0.0.0", port=self.health_port).start()
