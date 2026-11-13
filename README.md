@@ -187,4 +187,3 @@ to tags, IPs or ports fails the run.
 - A measurement write that fails is not retried, so that stroke's values never
   reach the PLC (it is logged). This is deliberate: a late write could be applied
   to the wrong part. Retries would need a handshake defined on the PLC side.
-- The HTTP endpoints have no authentication and listen on all interfaces.
