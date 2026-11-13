@@ -29,7 +29,6 @@ class Metrics:
         self.error_count = 0
         self.last_error_code = 0
         self.last_error_ts = None
-        self.error_count = 0
         self.error_counts = defaultdict(int)
 
     # ---- helpers ----
