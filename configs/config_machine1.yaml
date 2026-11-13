@@ -2,7 +2,7 @@ qass:
   ip: 10.16.81.163
   port: 17000
   type: manual
-  disconnect_timeout_sec: 30   # ⏱️ REQUIRED for auto-
+  disconnect_timeout_sec: 30   # ⏱️ REQUIRED for auto-restart
 
 plc:
   ip: 10.16.81.164
