@@ -317,3 +317,22 @@ async def test_unreachable_plc_aborts_rest_of_transaction(run_service, plc, qass
     assert meas == [BREAK_TAG]                                       # crack/current skipped
     i = after.index(STATUS_TAGS[0])                                  # full blocks again
     assert after[i:i + 6] == STATUS_TAGS                             # after recovery
+
+
+async def test_plc_watchdog_logs_transitions_only(run_service, plc, qass, clock, caplog):
+    """The watchdog used to log "no successful comms" every 2 s during an outage."""
+    caplog.set_level("INFO")
+    plc.tags[SERIAL_TAG] = "SN1"
+    cfg = make_cfg(qass.port, free_port(), enable_writes=False)
+    async with run_service(cfg) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        plc.status_fail = True
+        await clock.sim_sleep(30)                 # ~10 watchdog cycles in outage
+        assert svc.worker.metrics.plc_connected is False
+        plc.status_fail = False
+        await clock.sim_sleep(4)
+        assert svc.worker.metrics.plc_connected is True
+    assert caplog.text.count("PLC WATCHDOG: no successful comms") == 1
+    assert caplog.text.count("PLC WATCHDOG: comms OK again") == 1
+

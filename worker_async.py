@@ -578,11 +578,17 @@ class AsyncWorker:
 
     async def _plc_watchdog(self) -> None:
         """Flag PLC comms as lost after PLC_COMMS_TIMEOUT_SEC without success."""
+        comms_lost = False
         while not self.shutdown_flag:
             if time.time() - self.last_plc_ok > PLC_COMMS_TIMEOUT_SEC:
-                logging.error("PLC WATCHDOG: no successful comms")
+                if not comms_lost:  # log the transition, not every 2 s
+                    logging.error("PLC WATCHDOG: no successful comms")
+                comms_lost = True
                 self.metrics.plc_connected = False
             else:
+                if comms_lost:
+                    logging.info("PLC WATCHDOG: comms OK again")
+                comms_lost = False
                 self.metrics.plc_connected = True
             await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
 
