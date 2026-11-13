@@ -288,7 +288,7 @@ class AsyncWorker:
                 return result
             except Exception:
                 self.last_error_code = ERROR_PLC_COMMS
-                self.metrics.error_count += 1
+                self.metrics.mark_error(ERROR_PLC_COMMS)
 
                 try:
                     self.plc_conn.Close()

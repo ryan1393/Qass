@@ -114,6 +114,8 @@ async def test_plc_exception_recreates_connection_and_sets_error(run_service, pl
         await wait_until(lambda: svc.worker.last_error_code == 20, timeout=3, interval=0.0005)
         await wait_until(lambda: plc.instances == 2)
         assert svc.worker.metrics.error_count == errors_before + 1
+        assert svc.worker.metrics.error_counts[20] == 1
+        assert svc.worker.metrics.snapshot()["error_counts"]["PLC_COMMS"] == 1
         n = len(plc.calls)
         await clock.sim_sleep(3)
 
