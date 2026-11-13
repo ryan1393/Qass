@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from conftest import SERIAL_TAG, STATUS_TAGS, free_port, make_cfg
+from conftest import BREAK_TAG, SERIAL_TAG, STATUS_TAGS, free_port, make_cfg
 from fakes import rec, wait_until
 
 
@@ -290,3 +290,30 @@ async def test_qass_codes_take_priority_over_plc_code(run_service, plc, qass, cl
         await clock.sim_sleep(5)
         assert svc.worker.last_error_code == 10
 
+
+
+async def test_unreachable_plc_aborts_rest_of_transaction(run_service, plc, qass, clock):
+    """With the PLC unreachable every pylogix call waits for its socket timeout
+    (5 s), so after the first comms failure the rest of a heartbeat or
+    measurement transaction is skipped instead of holding the lock ~30 s."""
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        n = len(plc.calls)
+        plc.status_fail = True
+        await qass.send_records(rec("true", 10, 0, 1, 1), rec("false"))
+        await wait_until(lambda: svc.worker.stroke == 2)
+        await clock.sim_sleep(11)
+        down = [(c.kind, c.tag) for c in plc.calls[n:] if c.kind == "write"]
+        plc.status_fail = False
+        m = len(plc.calls)
+        await clock.sim_sleep(6)
+        after = [c.tag for c in plc.calls[m:] if c.kind == "write"]
+
+    status_writes = [t for k, t in down if t in STATUS_TAGS]
+    assert status_writes and set(status_writes) == {"QASS_Heartbeat"}  # 1 per heartbeat
+    meas = [t for k, t in down if t not in STATUS_TAGS]
+    assert meas == [BREAK_TAG]                                       # crack/current skipped
+    i = after.index(STATUS_TAGS[0])                                  # full blocks again
+    assert after[i:i + 6] == STATUS_TAGS                             # after recovery

@@ -468,6 +468,22 @@ class AsyncWorker:
             self.metrics.mark_plc_success()
             return result
 
+    def _write_tags(self, items: list[tuple[Any, Callable[[], Any]]]) -> list[Any]:
+        """Write (tag, value) pairs in order; runs inside the executor.
+
+        Each value is evaluated right before its own write. If a write returns a
+        comms-failure status the PLC is unreachable: the remaining writes would
+        each wait for pylogix's socket timeout (5 s) and fail too, so they are
+        skipped and the PLC lock is released sooner.
+        """
+        responses = []
+        for tag, value in items:
+            response = self.plc_conn.Write(tag, value())
+            responses.append(response)
+            if _is_comms_failure(getattr(response, "Status", "Success")):
+                break
+        return responses
+
     def _record_plc_error(self) -> None:
         """Set ERROR_PLC_COMMS; the QASS watchdog keeps it for PLC_ERROR_HOLD_SEC."""
         self.last_error_code = ERROR_PLC_COMMS
@@ -501,11 +517,11 @@ class AsyncWorker:
             raise ValueError(f"Unsupported qass type: {self.qass_type}")
 
         def write() -> list[Any]:
-            responses = [
-                self.plc_conn.Write(self.break_tag, break_limit),
-                self.plc_conn.Write(self.crack_tag, crack_limit),
-                self.plc_conn.Write(measurement_tag, e_current),
-            ]
+            responses = self._write_tags([
+                (self.break_tag, lambda: break_limit),
+                (self.crack_tag, lambda: crack_limit),
+                (measurement_tag, lambda: e_current),
+            ])
             logging.debug(
                 "Write to PLC Serial=%s Stroke=%s ECurrent=%s Break=%s Crack=%s",
                 ident, stroke,
@@ -523,6 +539,10 @@ class AsyncWorker:
             f"{r.TagName}={r.Status}" for r in responses
             if getattr(r, "Status", "Success") != "Success"
         ]
+        written = len(responses)
+        if written < 3:
+            skipped = [self.break_tag, self.crack_tag, measurement_tag][written:]
+            rejected += [f"{tag}=skipped" for tag in skipped]
         if rejected:
             logging.error(
                 "PLC measurement write not confirmed: Serial=%s Stroke=%s %s",
@@ -627,16 +647,15 @@ class AsyncWorker:
         """Write heartbeat and status tags, in this order, in one PLC transaction."""
 
         def write() -> list[Any]:
-            return [
-                self.plc_conn.Write(self.heartbeat_tag, self.heartbeat_value),
-                self.plc_conn.Write(self.service_ok_tag, True),
-                self.plc_conn.Write(self.qass_ok_tag, self.qass_connected),
-                self.plc_conn.Write(
-                    self.plc_ok_tag, time.time() - self.last_plc_ok < PLC_COMMS_TIMEOUT_SEC
-                ),
-                self.plc_conn.Write(self.last_stroke_tag, self.stroke),
-                self.plc_conn.Write(self.error_code_tag, self.last_error_code),
-            ]
+            return self._write_tags([
+                (self.heartbeat_tag, lambda: self.heartbeat_value),
+                (self.service_ok_tag, lambda: True),
+                (self.qass_ok_tag, lambda: self.qass_connected),
+                (self.plc_ok_tag,
+                 lambda: time.time() - self.last_plc_ok < PLC_COMMS_TIMEOUT_SEC),
+                (self.last_stroke_tag, lambda: self.stroke),
+                (self.error_code_tag, lambda: self.last_error_code),
+            ])
 
         await self._plc_call(write)
 
