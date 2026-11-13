@@ -478,7 +478,11 @@ class AsyncWorker:
             self.heartbeat_value ^= 1
 
             if self.plc_writes_enabled:
-                await self._write_plc_status()
+                try:
+                    await self._write_plc_status()
+                except Exception as e:
+                    # _plc_call already recreated the PLC object; keep beating.
+                    logging.error("PLC heartbeat write failed: %s", e)
 
             await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
 

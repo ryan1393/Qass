@@ -86,6 +86,7 @@ class PlcCall:
     t: float = 0.0
     thread: str = ""
     instance: int = 0
+    failed: bool = False  # this call raised an injected PlcFault
 
 
 class PlcFault(Exception):
@@ -161,6 +162,7 @@ class PlcSim:
                     time.sleep(sim.write_delay)
                     if sim.fail_all or sim.fail_reads > 0:
                         sim.fail_reads = max(0, sim.fail_reads - 1)
+                        sim.calls[-1].failed = True
                         raise PlcFault(f"injected read failure on {tag}")
                     if sim.status_fail:
                         return Response(tag, None, UNREACHABLE)
@@ -177,9 +179,11 @@ class PlcSim:
                     time.sleep(sim.write_delay)
                     if sim.fail_all or sim.fail_writes > 0:
                         sim.fail_writes = max(0, sim.fail_writes - 1)
+                        sim.calls[-1].failed = True
                         raise PlcFault(f"injected write failure on {tag}")
                     if sim.fail_write_tags.get(tag, 0) > 0:
                         sim.fail_write_tags[tag] -= 1
+                        sim.calls[-1].failed = True
                         raise PlcFault(f"injected write failure on {tag}")
                     if sim.status_fail:
                         return Response(tag, value, UNREACHABLE)

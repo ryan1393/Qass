@@ -18,6 +18,9 @@ def heartbeat_blocks(plc):
     i = 0
     while i < len(calls):
         c = calls[i]
+        if c.failed:  # transaction aborted by an injected fault
+            i += 1
+            continue
         if c.kind == "write" and c.tag == STATUS_TAGS[0]:
             block = calls[i:i + 6]
             if len(block) < 6:
@@ -179,17 +182,21 @@ async def test_error_codes_written_to_plc(run_service, plc, qass, clock, conns):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(strict=True, reason="BUG: one raising heartbeat write stops the heartbeat forever")
-async def test_heartbeat_survives_a_plc_exception(run_service, plc, qass, clock):
+async def test_heartbeat_survives_a_plc_exception(run_service, plc, qass, clock, caplog):
+    """Fixed bug: one raising heartbeat write used to stop the heartbeat forever."""
     plc.tags[SERIAL_TAG] = "SN1"
     async with run_service(make_cfg(qass.port, free_port())) as svc:
         await qass.wait_connections(1)
         await wait_until(lambda: len(heartbeat_blocks(plc)) >= 1)
+        n = len(heartbeat_blocks(plc))
         plc.fail_writes = 1
         await clock.sim_sleep(16)
         assert svc.worker.metrics.plc_connected is True
-    assert len(heartbeat_blocks(plc)) >= 3
+    assert len(heartbeat_blocks(plc)) >= n + 2
+    assert "PLC heartbeat write failed" in caplog.text
+    # the toggle keeps alternating across the failed cycle
+    hb = [values(b)[0] for b in heartbeat_blocks(plc)]
+    assert all(v in (0, 1) for v in hb)
 
 
 @pytest.mark.known_bug
