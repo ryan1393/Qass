@@ -123,6 +123,29 @@ after each stroke, so the counter survives restarts and rebuilds.
 
 Ports: machine1 8081, machine2 8082, machine3 8083, machine4 8084.
 
+`metrics.last_error_code` / `last_error_name` / `last_error_ts` describe the last error *recorded*
+since the service started; they are never reset to 0. For the current state use `/health`
+(`qass_connected`, `last_qass_data_s`) and `metrics.plc_connected`.
+
+## Dashboard (RyanWRLD)
+
+These endpoints feed the **QASS dashboard** in [RyanWRLD](https://github.com/ryan1393/RyanWRLD)
+(MeshForge, `apps/qass-dashboard`, port 4205). The MeshForge API polls `/health` and `/metrics`
+every 5 s and reads `/logs` on request. It only sends GET requests, so it never changes anything
+here or on a PLC. The dashboard requires a MeshForge sign-in.
+
+To connect it, set these on the MeshForge server (its `.env` or Admin → Server Settings → QASS
+dashboard), with `<qass-host>` being this Docker host:
+
+```sh
+QASS_MONITOR_ENABLED=true
+QASS_MACHINES=machine1=http://<qass-host>:8081,machine2=http://<qass-host>:8082,machine3=http://<qass-host>:8083,machine4=http://<qass-host>:8084
+```
+
+The MeshForge API must be able to reach ports 8081–8084 on this host. Nothing changes on the QASS
+side: the dashboard works with any image that serves these endpoints, including `13.0`. If you
+rename a machine, add one or change a port, update `QASS_MACHINES` to match.
+
 ## Build, deploy, roll back
 
 On the Docker host, in this directory:
