@@ -34,23 +34,32 @@ REAL_OPEN_CONNECTION = asyncio.open_connection
 
 
 class WarpClock:
-    """Simulated wall clock running ``1/scale`` times faster than real time."""
+    """Simulated clocks running ``1/scale`` times faster than real time.
+
+    ``mono()`` replaces the service's monotonic clock. ``time()`` replaces the
+    wall clock: the same, plus ``wall_offset``, which a test can change to
+    simulate an NTP step.
+    """
 
     def __init__(self, scale: float = 0.05) -> None:
         self.scale = scale
         self._real0 = REAL_TIME()
+        self.wall_offset = 0.0
         # (task, requested_delay, simulated_time) for every asyncio.sleep call
         self.sleeps: list[tuple[Any, float, float]] = []
 
-    def time(self) -> float:
+    def mono(self) -> float:
         return self._real0 + (REAL_TIME() - self._real0) / self.scale
+
+    def time(self) -> float:
+        return self.mono() + self.wall_offset
 
     async def sleep(self, delay: float, result: Any = None) -> Any:
         try:
             task = asyncio.current_task()
         except RuntimeError:
             task = None
-        self.sleeps.append((task, delay, self.time()))
+        self.sleeps.append((task, delay, self.mono()))
         return await REAL_SLEEP(delay * self.scale, result)
 
     async def real_sleep(self, seconds: float) -> None:

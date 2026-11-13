@@ -336,3 +336,33 @@ async def test_plc_watchdog_logs_transitions_only(run_service, plc, qass, clock,
     assert caplog.text.count("PLC WATCHDOG: no successful comms") == 1
     assert caplog.text.count("PLC WATCHDOG: comms OK again") == 1
 
+
+@pytest.mark.parametrize("jump", [+15, -15, +3600])
+async def test_wall_clock_steps_do_not_trip_watchdogs(run_service, plc, qass, clock, jump):
+    """Timers used to run on the wall clock. An NTP step forward made QASS look
+    silent (error 11; past disconnect_timeout_sec the service exited) and the
+    PLC look dead. A step backward delayed both watchdogs by the step size."""
+    plc.tags[SERIAL_TAG] = "SN1"
+    cfg = make_cfg(qass.port, free_port(), enable_writes=False,
+                   qass={"disconnect_timeout_sec": 30})
+    async with run_service(cfg) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        for _ in range(3):
+            await qass.send_records(rec("false"))
+            await clock.sim_sleep(2)
+
+        # NTP step, and QASS goes quiet at the same moment
+        clock.wall_offset += jump
+        codes, plc_ok = set(), set()
+        end = clock.mono() + 6
+        while clock.mono() < end:
+            codes.add(svc.worker.last_error_code)
+            plc_ok.add(svc.worker.metrics.plc_connected)
+            await clock.real_sleep(0.001)
+        assert codes == {0}          # < 10 s since the last data
+        assert plc_ok == {True}
+
+        await clock.sim_sleep(8)     # ~14 s since the last data
+        assert svc.worker.last_error_code == 11
+

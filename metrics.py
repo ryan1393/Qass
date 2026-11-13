@@ -28,7 +28,7 @@ class Metrics:
 
     def __init__(self) -> None:
         self._lock = Lock()
-        self.start_time = time.time()
+        self.start_time = time.monotonic()  # for uptime only
 
         # Connectivity
         self.qass_connected = False
@@ -50,7 +50,7 @@ class Metrics:
     # ---- helpers ----
 
     def uptime_seconds(self) -> int:
-        return int(time.time() - self.start_time)
+        return int(time.monotonic() - self.start_time)
 
     def mark_qass_message(self) -> None:
         with self._lock:

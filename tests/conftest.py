@@ -91,6 +91,8 @@ def make_cfg(qass_port: int, health_port: int, qass_type: str = "auto",
 def clock(monkeypatch: pytest.MonkeyPatch) -> WarpClock:
     c = WarpClock(scale=0.05)
     monkeypatch.setattr(time, "time", c.time)
+    # the service measures intervals with worker_async.monotonic()
+    monkeypatch.setattr(worker_async, "monotonic", c.mono)
     monkeypatch.setattr(asyncio, "sleep", c.sleep)
     return c
 

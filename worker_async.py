@@ -45,6 +45,11 @@ from state_store import StrokeStateStore
 
 T = TypeVar("T")
 
+
+def monotonic() -> float:
+    """Clock for every interval/timeout. Unaffected by NTP or manual clock steps."""
+    return time.monotonic()
+
 # QASS protocol
 QASS_SUBSCRIBE_CMD = b'{"cmd":"sendreadings","p1":"true"}'
 QASS_READ_SIZE = 12000  # max bytes per socket read (records may span reads)
@@ -183,12 +188,13 @@ class AsyncWorker:
         self.serial_epoch = 0  # bumped on every serial change
 
         # PLC watchdog tracking
-        self.last_plc_ok = time.time()
+        self.last_plc_ok = monotonic()
         self.plc_comms_failing = False  # last PLC call hit a comms-failure status
         self.last_plc_error_ts = float("-inf")  # last failed PLC call
 
-        # QASS tracking
-        self.last_qass_data = 0.0  # last "measuring" payload (or connect)
+        # QASS tracking (monotonic times; None = never)
+        self.last_qass_data: float | None = None  # last "measuring" record (or connect)
+        self.last_qass_message: float | None = None  # last read of any kind
         self.qass_connected = False
         self.qass_generation = 0  # bumped on every successful connect
 
@@ -255,7 +261,7 @@ class AsyncWorker:
             self.qass_generation += 1
             self.qass_connected = True
             self.metrics.mark_qass_connected(self.qass_generation)
-            self.last_qass_data = time.time()
+            self.last_qass_data = monotonic()
 
             # A stroke cannot continue across a reconnect
             self.stroke_buffer.clear()
@@ -308,6 +314,7 @@ class AsyncWorker:
                 if local_generation != self.qass_generation:
                     continue
 
+                self.last_qass_message = monotonic()
                 self.metrics.mark_qass_message()
 
                 # Reassemble complete JSON records across reads, then enqueue
@@ -315,7 +322,7 @@ class AsyncWorker:
                 overflowed = self.framer.overflowed
                 for record_text in self.framer.feed(data):
                     if '"measuring"' in record_text:
-                        self.last_qass_data = time.time()
+                        self.last_qass_data = monotonic()
                         await self.queue.put(record_text)
                 if self.framer.overflowed != overflowed:
                     logging.warning(
@@ -465,7 +472,7 @@ class AsyncWorker:
             if self.plc_comms_failing:
                 logging.info("PLC comms restored")
             self.plc_comms_failing = False
-            self.last_plc_ok = time.time()
+            self.last_plc_ok = monotonic()
             self.metrics.mark_plc_success()
             return result
 
@@ -488,7 +495,7 @@ class AsyncWorker:
     def _record_plc_error(self) -> None:
         """Set ERROR_PLC_COMMS; the QASS watchdog keeps it for PLC_ERROR_HOLD_SEC."""
         self.last_error_code = ERROR_PLC_COMMS
-        self.last_plc_error_ts = time.time()
+        self.last_plc_error_ts = monotonic()
         self.metrics.mark_error(ERROR_PLC_COMMS)
 
     async def _write_plc(
@@ -581,7 +588,7 @@ class AsyncWorker:
         """Flag PLC comms as lost after PLC_COMMS_TIMEOUT_SEC without success."""
         comms_lost = False
         while not self.shutdown_flag:
-            if time.time() - self.last_plc_ok > PLC_COMMS_TIMEOUT_SEC:
+            if monotonic() - self.last_plc_ok > PLC_COMMS_TIMEOUT_SEC:
                 if not comms_lost:  # log the transition, not every 2 s
                     logging.error("PLC WATCHDOG: no successful comms")
                 comms_lost = True
@@ -600,12 +607,12 @@ class AsyncWorker:
         in the last PLC_ERROR_HOLD_SEC) > NONE.
         """
         while not self.shutdown_flag:
-            now = time.time()
+            now = monotonic()
 
             if not self.qass_connected:
                 self.last_error_code = ERROR_QASS_DISCONNECTED
                 self.metrics.mark_error(ERROR_QASS_DISCONNECTED)
-            elif now - self.last_qass_data > QASS_NO_DATA_SEC:
+            elif self.last_qass_data is None or now - self.last_qass_data > QASS_NO_DATA_SEC:
                 self.last_error_code = ERROR_QASS_NO_DATA
                 self.metrics.mark_error(ERROR_QASS_NO_DATA)
             elif now - self.last_plc_error_ts < PLC_ERROR_HOLD_SEC:
@@ -622,12 +629,12 @@ class AsyncWorker:
         of any kind has arrived for ``disconnect_timeout_sec``. Never fires before
         the first message."""
         timeout = self.disconnect_timeout_sec
-        last_msg = self.metrics.last_qass_message_ts
+        last_msg = self.last_qass_message
 
         if last_msg is None:
             return
 
-        if time.time() - last_msg > timeout:
+        if monotonic() - last_msg > timeout:
             logging.error(
                 "QASS disconnected for %s seconds → exiting container",
                 timeout,
@@ -659,7 +666,7 @@ class AsyncWorker:
                 (self.service_ok_tag, lambda: True),
                 (self.qass_ok_tag, lambda: self.qass_connected),
                 (self.plc_ok_tag,
-                 lambda: time.time() - self.last_plc_ok < PLC_COMMS_TIMEOUT_SEC),
+                 lambda: monotonic() - self.last_plc_ok < PLC_COMMS_TIMEOUT_SEC),
                 (self.last_stroke_tag, lambda: self.stroke),
                 (self.error_code_tag, lambda: self.last_error_code),
             ])
@@ -676,7 +683,11 @@ class AsyncWorker:
             return web.json_response({
                 "status": "ok",
                 "qass_connected": self.qass_connected,
-                "last_qass_data_s": int(time.time() - self.last_qass_data),
+                "last_qass_data_s": (
+                    # before the first connect: seconds since 1970, as always
+                    int(time.time()) if self.last_qass_data is None
+                    else int(monotonic() - self.last_qass_data)
+                ),
                 "serial": self.ident,
             })
 
