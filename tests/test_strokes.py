@@ -323,9 +323,8 @@ async def test_numeric_like_values_still_accepted(run_service, plc, qass):
     assert measurement_writes(plc) == [(BREAK_TAG, 7), (CRACK_TAG, 1), (CURRENT_TAG, 12)]
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(strict=True, reason="BUG: a record split across two TCP reads is lost")
 async def test_record_split_across_reads(run_service, plc, qass):
+    """Fixed bug: a record split across two TCP reads used to be lost."""
     plc.tags[SERIAL_TAG] = "SN1"
     async with run_service(make_cfg(qass.port, free_port())) as svc:
         await ready(svc, qass)
@@ -338,9 +337,8 @@ async def test_record_split_across_reads(run_service, plc, qass):
     assert measurement_writes(plc) == [(BREAK_TAG, 9), (CRACK_TAG, 9), (CURRENT_TAG, 99)]
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(strict=True, reason="BUG: a read ending mid-object drops the whole read")
-async def test_complete_records_before_a_split_are_lost(run_service, plc, qass):
+async def test_complete_records_before_a_split_are_kept(run_service, plc, qass):
+    """Fixed bug: a read ending mid-object used to drop every record in it."""
     plc.tags[SERIAL_TAG] = "SN1"
     async with run_service(make_cfg(qass.port, free_port())) as svc:
         await ready(svc, qass)
@@ -392,4 +390,48 @@ async def test_rejected_measurement_write_is_logged(run_service, plc, qass, capl
         await wait_until(lambda: svc.worker.stroke == 2)
         plc.status_fail = False
     assert "PLC measurement write not confirmed: Serial=SN1 Stroke=1" in caplog.text
+
+
+async def test_record_split_in_many_pieces_and_multibyte(run_service, plc, qass):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await ready(svc, qass)
+        stream = "".join(json.dumps(r, ensure_ascii=False) for r in (
+            rec("true", 10, 0, 1, 1, note="Prüfung {ok}"),
+            rec("true", 77, 0, 7, 7, note='quote \\" and } brace'),
+            rec("false"),
+        )).encode()
+        for k in range(0, len(stream), 7):  # 7-byte reads split UTF-8 chars too
+            await qass.send(stream[k:k + 7], gap=0.01)
+        await wait_until(lambda: len(measurement_writes(plc)) == 3, timeout=3)
+    assert measurement_writes(plc) == [(BREAK_TAG, 7), (CRACK_TAG, 7), (CURRENT_TAG, 77)]
+
+
+async def test_partial_record_is_discarded_on_reconnect(run_service, plc, qass):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await ready(svc, qass)
+        half = json.dumps(rec("true", 99, 0, 9, 9))[:15]
+        await qass.send(half)
+        await qass.drop_client()
+        await qass.wait_connections(2)
+        await qass.send_records(rec("true", 5, 0, 1, 1), rec("false"))
+        await wait_until(lambda: len(measurement_writes(plc)) == 3, timeout=3)
+    assert measurement_writes(plc) == [(BREAK_TAG, 1), (CRACK_TAG, 1), (CURRENT_TAG, 5)]
+
+
+async def test_non_measuring_object_in_same_read_is_ignored(run_service, plc, qass, clock):
+    """Records are now filtered one by one: an object without "measuring" that
+    happens to arrive in the same TCP read as measuring ones no longer acts as
+    an end-of-stroke marker."""
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await ready(svc, qass)
+        await qass.send(json.dumps(rec("true", 10, 0, 1, 1)) + '{"status": "idle"}'
+                        + json.dumps(rec("true", 20, 0, 2, 2)))
+        await clock.sim_sleep(2)
+        assert svc.worker.stroke == 1
+        await qass.send_records(rec("false"))
+        await wait_until(lambda: len(measurement_writes(plc)) == 3)
+    assert measurement_writes(plc) == [(BREAK_TAG, 2), (CRACK_TAG, 2), (CURRENT_TAG, 20)]
 

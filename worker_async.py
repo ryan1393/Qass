@@ -40,14 +40,14 @@ from metrics import (
     Metrics,
 )
 from paths import LOG_DIR
-from qass_normalizer import split_and_parse_qass_json
+from qass_normalizer import QassStreamFramer, split_and_parse_qass_json
 from state_store import StrokeStateStore
 
 T = TypeVar("T")
 
 # QASS protocol
 QASS_SUBSCRIBE_CMD = b'{"cmd":"sendreadings","p1":"true"}'
-QASS_READ_SIZE = 12000  # bytes per socket read
+QASS_READ_SIZE = 12000  # max bytes per socket read (records may span reads)
 QASS_RECONNECT_RESET_DELAY = 1  # backoff restarts here after a successful connect
 QASS_NO_DATA_SEC = 10  # connected but no "measuring" payload -> ERROR_QASS_NO_DATA
 
@@ -167,7 +167,10 @@ class AsyncWorker:
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
 
-        # Raw QASS payloads waiting for the consumer
+        # Splits the TCP byte stream into complete JSON records
+        self.framer = QassStreamFramer()
+
+        # QASS record texts waiting for the consumer
         self.queue: asyncio.Queue[str] = asyncio.Queue()
 
         self.loop = asyncio.get_running_loop()
@@ -254,6 +257,7 @@ class AsyncWorker:
 
             # A stroke cannot continue across a reconnect
             self.stroke_buffer.clear()
+            self.framer.reset()  # partial data from the old socket is stale
 
             # Subscribe to measurements
             self.writer.write(QASS_SUBSCRIBE_CMD)
@@ -284,7 +288,7 @@ class AsyncWorker:
                 pass
 
     async def _receiver(self) -> None:
-        """Read raw payloads from QASS; queue the ones that contain "measuring"."""
+        """Read from QASS; queue each complete JSON record containing "measuring"."""
         local_generation = 0
 
         while not self.shutdown_flag:
@@ -302,13 +306,20 @@ class AsyncWorker:
                 if local_generation != self.qass_generation:
                     continue
 
-                payload = data.decode(errors="ignore")
                 self.metrics.mark_qass_message()
 
-                # Only enqueue measurement payloads
-                if '"measuring"' in payload:
-                    self.last_qass_data = time.time()
-                    await self.queue.put(payload)
+                # Reassemble complete JSON records across reads, then enqueue
+                # only measurement records.
+                overflowed = self.framer.overflowed
+                for record_text in self.framer.feed(data):
+                    if '"measuring"' in record_text:
+                        self.last_qass_data = time.time()
+                        await self.queue.put(record_text)
+                if self.framer.overflowed != overflowed:
+                    logging.warning(
+                        "Dropped unterminated QASS data (> %s chars without a "
+                        "complete JSON record)", self.framer.max_pending,
+                    )
 
             except Exception as e:
                 logging.error("QASS receive error: %s", e)
