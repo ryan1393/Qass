@@ -353,14 +353,31 @@ async def test_complete_records_before_a_split_are_lost(run_service, plc, qass):
     assert measurement_writes(plc) == [(BREAK_TAG, 9), (CRACK_TAG, 9), (CURRENT_TAG, 99)]
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(strict=True, reason="BUG: an exception from a measurement write kills the consumer")
-async def test_processing_survives_a_raising_plc_write(run_service, plc, qass):
+@pytest.mark.parametrize("qass_type", ["auto", "manual"])
+async def test_processing_survives_a_raising_plc_write(run_service, plc, qass, caplog, qass_type):
+    """Fixed bug: an exception from a measurement write used to end the consumer."""
     plc.tags[SERIAL_TAG] = "SN1"
-    async with run_service(make_cfg(qass.port, free_port(), enable_writes=True)) as svc:
+    async with run_service(make_cfg(qass.port, free_port(), qass_type=qass_type)) as svc:
         await ready(svc, qass)
         plc.fail_write_tags[BREAK_TAG] = 1  # e.g. a pylogix type error
         await qass.send_records(rec("true", 10, 0, 1, 1), rec("false"))
+        await wait_until(lambda: svc.worker.stroke == 2)
         await qass.send_records(rec("true", 20, 0, 2, 2), rec("false"))
-        await wait_until(
-            lambda: (BREAK_TAG, 2) in measurement_writes(plc), timeout=1.5)
+        await wait_until(lambda: (BREAK_TAG, 2) in measurement_writes(plc), timeout=3)
+        assert svc.worker.stroke == 3
+        assert svc.worker.stroke_buffer == []
+    tag = CURRENT_TAG if qass_type == "auto" else "QASS_Measurement_2"
+    # stroke 1 was attempted (break write raised), stroke 2 keeps its own number
+    assert measurement_writes(plc)[-3:] == [(BREAK_TAG, 2), (CRACK_TAG, 2), (tag, 20)]
+    assert "PLC measurement write failed: Serial=SN1 Stroke=1" in caplog.text
+
+
+async def test_unsupported_type_logs_and_keeps_counting(run_service, plc, qass, caplog):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port(), qass_type="semi")) as svc:
+        await ready(svc, qass)
+        for _ in range(2):
+            await qass.send_records(rec("true", 10), rec("false"))
+        await wait_until(lambda: svc.worker.stroke == 3)
+    assert measurement_writes(plc) == []
+    assert caplog.text.count("Unsupported qass type: semi") == 2

@@ -271,7 +271,11 @@ class AsyncWorker:
         while not self.shutdown_flag:
             payload = await self.queue.get()
             for record in split_and_parse_qass_json(payload):
-                await self._process_record(record)
+                try:
+                    await self._process_record(record)
+                except Exception:
+                    # Safety net: never let one record end stroke processing.
+                    logging.exception("Failed to process QASS record: %r", record)
 
     async def _process_record(self, record: dict) -> None:
         """Buffer samples while measuring; on the first non-measuring record,
@@ -315,7 +319,15 @@ class AsyncWorker:
             e_current, e_max, break_limit, crack_limit,
         )
 
-        await self._write_plc(e_current, break_limit, crack_limit)
+        try:
+            await self._write_plc(e_current, break_limit, crack_limit)
+        except Exception:
+            # The stroke happened even if the PLC write failed: still advance the
+            # counter so later strokes keep their own numbers.
+            logging.exception(
+                "PLC measurement write failed: Serial=%s Stroke=%s",
+                self.ident, self.stroke,
+            )
 
         # Prepare for the next stroke
         self.stroke_buffer.clear()
