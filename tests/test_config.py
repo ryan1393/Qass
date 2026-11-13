@@ -98,3 +98,49 @@ def test_state_db_path_is_per_config(monkeypatch):
         paths.STATE_DIR / "state_config_machine3.db"
     names = {paths.state_db_path(p).name for p in MACHINE_CONFIGS}
     assert len(names) == len(MACHINE_CONFIGS)  # no two machines share a file
+
+
+# ---------------------------------------------------------------------------
+# QASS_ENABLE_WRITES override
+# ---------------------------------------------------------------------------
+
+from config import apply_env_overrides  # noqa: E402
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("false", False), ("False", False), ("0", False), ("no", False), ("off", False),
+    ("true", True), ("TRUE", True), ("1", True), ("yes", True), (" on ", True),
+])
+def test_enable_writes_env_override(monkeypatch, raw, expected):
+    monkeypatch.setenv("QASS_ENABLE_WRITES", raw)
+    cfg = make_cfg(1, 2, enable_writes=not expected)
+    out = apply_env_overrides(cfg)
+    assert out["plc"]["enable_writes"] is expected
+    assert cfg["plc"]["enable_writes"] is (not expected)  # input not mutated
+
+
+@pytest.mark.parametrize("raw", [None, "", "  "])
+def test_enable_writes_env_unset_keeps_config(monkeypatch, raw):
+    if raw is None:
+        monkeypatch.delenv("QASS_ENABLE_WRITES", raising=False)
+    else:
+        monkeypatch.setenv("QASS_ENABLE_WRITES", raw)
+    for configured in (True, False):
+        cfg = make_cfg(1, 2, enable_writes=configured)
+        assert apply_env_overrides(cfg)["plc"]["enable_writes"] is configured
+    cfg = make_cfg(1, 2)
+    del cfg["plc"]["enable_writes"]
+    assert apply_env_overrides(cfg) == cfg  # default (True) untouched
+
+
+def test_enable_writes_env_invalid(monkeypatch):
+    monkeypatch.setenv("QASS_ENABLE_WRITES", "maybe")
+    with pytest.raises(ConfigError, match="QASS_ENABLE_WRITES='maybe': use true or false"):
+        apply_env_overrides(make_cfg(1, 2))
+
+
+def test_load_config_applies_override(monkeypatch, caplog):
+    monkeypatch.setenv("QASS_ENABLE_WRITES", "false")
+    cfg = load_config(REPO_ROOT / "configs" / "config_machine4.yaml")
+    assert cfg["plc"]["enable_writes"] is False
+    assert "QASS_ENABLE_WRITES=false overrides plc.enable_writes=True" in caplog.text

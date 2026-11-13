@@ -10,6 +10,7 @@ key: the optional keys keep their defaults where they are used
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -109,4 +110,39 @@ def load_config(path: Path) -> dict:
             f"{path}: config file not found "
             "(pass one, e.g. configs/config_machine1.yaml)"
         ) from None
-    return validate_config(cfg, str(path))
+    cfg = validate_config(cfg, str(path))
+    return apply_env_overrides(cfg)
+
+
+ENABLE_WRITES_ENV = "QASS_ENABLE_WRITES"
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def apply_env_overrides(cfg: dict) -> dict:
+    """QASS_ENABLE_WRITES (true/false), if set, overrides plc.enable_writes.
+
+    Lets one container run with PLC writes off (e.g. a test rollout) without
+    editing the config baked into the image. Unset: the config value applies.
+    """
+    raw = os.environ.get(ENABLE_WRITES_ENV)
+    if raw is None or raw.strip() == "":
+        return cfg
+    value = raw.strip().lower()
+    if value in _TRUE:
+        enabled = True
+    elif value in _FALSE:
+        enabled = False
+    else:
+        raise ConfigError(
+            f"{ENABLE_WRITES_ENV}={raw!r}: use true or false (or leave it unset)"
+        )
+    configured = cfg["plc"].get("enable_writes", DEFAULT_ENABLE_WRITES)
+    if enabled != configured:
+        logging.warning(
+            "%s=%s overrides plc.enable_writes=%s from the config",
+            ENABLE_WRITES_ENV, raw.strip(), configured,
+        )
+    cfg = dict(cfg)
+    cfg["plc"] = {**cfg["plc"], "enable_writes": enabled}
+    return cfg

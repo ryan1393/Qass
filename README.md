@@ -103,6 +103,7 @@ Production uses `config_machine1..4.yaml`.
 | `QASS_LOG_FILE` | `qass.log` | log file name (also served by `/logs`) |
 | `QASS_LOG_DIR` | `<app>/logs` | log directory |
 | `QASS_STATE_DIR` | `<app>/state` | stroke-state directory |
+| `QASS_ENABLE_WRITES` | unset | `false` turns all PLC writes off (overrides `plc.enable_writes`), `true` forces them on; unset = use the config |
 
 Logs rotate at 10 MB and keep 5 backups. The format is
 `%(asctime)s %(levelname)s %(name)s %(message)s`, written to the file and to stdout.
@@ -149,9 +150,26 @@ docker compose up -d --no-build --force-recreate
 
 You can also check out the previous commit and run `docker compose up -d --build` again.
 
-Safe first rollout: set `plc.enable_writes: false` in one machine's config,
-deploy only that service, and compare its stroke log lines with the old
-container's.
+Safe first rollout: turn PLC writes off for one machine without touching its
+config or rebuilding twice. Create `docker-compose.override.yml` next to
+`docker-compose.yml`; Compose merges it automatically, and it is git-ignored:
+
+```yaml
+services:
+  qass-machine4:
+    environment:
+      QASS_ENABLE_WRITES: "false"
+```
+
+Then `docker compose up -d --build qass-machine4`. The log shows
+`QASS_ENABLE_WRITES=false overrides plc.enable_writes=True` and
+`PLC writes DISABLED`. The service still reads the serial and logs every
+`Serial=… Stroke=…` line, but writes nothing to the PLC: no measurements and
+no heartbeat or status tags.
+
+To send to the PLC again, delete the override file (or set it to `"true"`) and
+run `docker compose up -d qass-machine4`. No rebuild is needed; Compose recreates
+the container with the new environment.
 
 ## Tests
 

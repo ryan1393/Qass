@@ -13,3 +13,6 @@ __pycache__/
 
 # Test cache
 .pytest_cache/
+
+# Per-host Compose tweaks (e.g. QASS_ENABLE_WRITES for a test rollout)
+docker-compose.override.yml

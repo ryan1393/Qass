@@ -49,7 +49,8 @@ async def http_up(port: int, timeout: float = 10) -> dict:
 
 
 async def run_main(tmp_path: Path, qass: FakeQass, cfg: dict, cfg_name: str | None,
-                   arg: str | None, log_file: str = "qass_proc.log"):
+                   arg: str | None, log_file: str = "qass_proc.log",
+                   extra_env: dict | None = None):
     app = copy_app(tmp_path)
     if cfg_name:
         (app / "configs" / cfg_name).write_text(yaml.safe_dump(cfg))
@@ -58,6 +59,8 @@ async def run_main(tmp_path: Path, qass: FakeQass, cfg: dict, cfg_name: str | No
     env = dict(os.environ, QASS_LOG_FILE=log_file, QASS_LOG_DIR=str(logs),
                QASS_STATE_DIR=str(state), FAKE_SERIAL_TAG=SERIAL_TAG,
                PYTHONUNBUFFERED="1")
+    env.pop("QASS_ENABLE_WRITES", None)
+    env.update(extra_env or {})
     args = [sys.executable, str(LAUNCHER), str(app), str(out), "SN42"]
     if arg is not None:
         args.append(arg.replace("{app}", str(app)))
@@ -182,3 +185,27 @@ async def test_no_argument_without_default_yaml_exits_cleanly(tmp_path, qass):
     assert code == 1
     assert "Invalid config:" in console and "default.yaml: config file not found" in console
     assert "Traceback" not in console
+
+
+async def test_enable_writes_env_switch_turns_plc_writes_off(tmp_path, qass):
+    """QASS_ENABLE_WRITES=false on the container: no PLC writes at all, while
+    the config file still says enable_writes: true. Serial is still read."""
+    port = free_port()
+    cfg = make_cfg(qass.port, port, enable_writes=True, qass={"disconnect_timeout_sec": 2})
+    app, proc, out, log_path = await run_main(
+        tmp_path, qass, cfg, "config_machine4.yaml", "configs/config_machine4.yaml",
+        extra_env={"QASS_ENABLE_WRITES": "false"})
+    try:
+        await drive_one_stroke_then_go_silent(qass, port, proc)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+    dump = json.loads(out.read_text())
+    assert [c for c in dump["calls"] if c[0] == "write"] == []
+    assert any(c[0] == "read" for c in dump["calls"])
+    text = log_path.read_text()
+    assert "QASS_ENABLE_WRITES=false overrides plc.enable_writes=True" in text
+    assert "PLC writes DISABLED" in text
+    assert "Serial=SN42 Stroke=1 ECurrent=12 EMax=34 Break=56 Crack=78" in text
+
