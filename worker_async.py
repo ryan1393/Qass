@@ -125,9 +125,8 @@ class AsyncWorker:
             asyncio.create_task(self._qass_watchdog()),
         ]
 
-        # Block until shutdown is requested
+        # Block until shutdown is requested; the caller (main) runs shutdown()
         await shutdown_event.wait()
-        await self.shutdown()
 
     async def shutdown(self):
         # Clean shutdown of all tasks and sockets

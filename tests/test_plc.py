@@ -201,3 +201,10 @@ async def test_unreachable_plc_trips_watchdog(run_service, plc, qass, clock):
         plc.status_fail = True  # what real pylogix does when the PLC is down
         await clock.sim_sleep(14)
         assert svc.worker.metrics.plc_connected is False
+
+
+async def test_shutdown_closes_plc_once(run_service, plc, qass):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())):
+        await qass.wait_connections(1)
+    assert [c.kind for c in plc.calls].count("close") == 1
