@@ -55,6 +55,7 @@ SERIAL_POLL_SEC = 1
 WATCHDOG_INTERVAL_SEC = 2
 HEARTBEAT_INTERVAL_SEC = 5
 PLC_COMMS_TIMEOUT_SEC = 10  # plc_ok is False after this long without a successful call
+PLC_ERROR_HOLD_SEC = 10  # error code stays PLC_COMMS this long after a failed PLC call
 
 STATE_SAVE_EVERY = 25  # persist the stroke buffer every N samples
 LOG_TAIL_LINES = 100  # lines returned by /logs
@@ -178,6 +179,7 @@ class AsyncWorker:
         # PLC watchdog tracking
         self.last_plc_ok = time.time()
         self.plc_comms_failing = False  # last PLC call hit a comms-failure status
+        self.last_plc_error_ts = float("-inf")  # last failed PLC call
 
         # QASS tracking
         self.last_qass_data = 0.0  # last "measuring" payload (or connect)
@@ -398,8 +400,7 @@ class AsyncWorker:
             try:
                 result = await self.loop.run_in_executor(None, fn)
             except Exception:
-                self.last_error_code = ERROR_PLC_COMMS
-                self.metrics.mark_error(ERROR_PLC_COMMS)
+                self._record_plc_error()
 
                 try:
                     self.plc_conn.Close()
@@ -416,8 +417,7 @@ class AsyncWorker:
             failures = _comms_failures(result)
             if failures:
                 # The call returned, but the PLC was not reached: not a success.
-                self.last_error_code = ERROR_PLC_COMMS
-                self.metrics.mark_error(ERROR_PLC_COMMS)
+                self._record_plc_error()
                 if not self.plc_comms_failing:
                     logging.error("PLC comms failure: %s", failures[0])
                 self.plc_comms_failing = True
@@ -429,6 +429,12 @@ class AsyncWorker:
             self.last_plc_ok = time.time()
             self.metrics.mark_plc_success()
             return result
+
+    def _record_plc_error(self) -> None:
+        """Set ERROR_PLC_COMMS; the QASS watchdog keeps it for PLC_ERROR_HOLD_SEC."""
+        self.last_error_code = ERROR_PLC_COMMS
+        self.last_plc_error_ts = time.time()
+        self.metrics.mark_error(ERROR_PLC_COMMS)
 
     async def _write_plc(self, e_current: int, break_limit: int, crack_limit: int) -> None:
         """Write one stroke result. Order: break, crack, then the measurement tag."""
@@ -514,7 +520,11 @@ class AsyncWorker:
             await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
 
     async def _qass_watchdog(self) -> None:
-        """Set the error code from QASS state; exit if QASS has gone silent."""
+        """Set the error code; exit if QASS has gone silent.
+
+        Priority: QASS_DISCONNECTED > QASS_NO_DATA > PLC_COMMS (a PLC call failed
+        in the last PLC_ERROR_HOLD_SEC) > NONE.
+        """
         while not self.shutdown_flag:
             now = time.time()
 
@@ -524,6 +534,10 @@ class AsyncWorker:
             elif now - self.last_qass_data > QASS_NO_DATA_SEC:
                 self.last_error_code = ERROR_QASS_NO_DATA
                 self.metrics.mark_error(ERROR_QASS_NO_DATA)
+            elif now - self.last_plc_error_ts < PLC_ERROR_HOLD_SEC:
+                # QASS is fine but a PLC call failed recently: keep reporting it
+                # (already counted in metrics when it happened)
+                self.last_error_code = ERROR_PLC_COMMS
             else:
                 self.last_error_code = ERROR_NONE
             self._exit_if_qass_silent()

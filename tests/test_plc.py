@@ -255,3 +255,38 @@ async def test_shutdown_closes_plc_once(run_service, plc, qass):
     async with run_service(make_cfg(qass.port, free_port())):
         await qass.wait_connections(1)
     assert [c.kind for c in plc.calls].count("close") == 1
+
+
+async def test_plc_comms_error_code_is_held_for_10s(run_service, plc, qass, clock):
+    """Fixed bug: error 20 used to be overwritten by the QASS watchdog within 2 s,
+    so the PLC almost never saw it."""
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        for _ in range(3):
+            await qass.send_records(rec("false"))
+            await clock.sim_sleep(2)
+        n_before = len(heartbeat_blocks(plc))
+        plc.fail_reads = 1                      # one failed serial read
+        for _ in range(12):                     # keep QASS data fresh (no code 11)
+            await qass.send_records(rec("false"))
+            await clock.sim_sleep(2)
+        blocks = heartbeat_blocks(plc)
+    codes = [values(b)[5] for b in blocks[n_before:]]
+    assert codes[0] == 20 and codes[1] == 20, codes      # written at least twice
+    assert codes[-1] == 0 and codes[-2] == 0, codes      # cleared after ~10 s
+    assert set(codes) == {0, 20}
+
+
+async def test_qass_codes_take_priority_over_plc_code(run_service, plc, qass, clock, conns):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        conns.refuse = True
+        await qass.drop_client()
+        plc.fail_reads = 1
+        await clock.sim_sleep(5)
+        assert svc.worker.last_error_code == 10
+
