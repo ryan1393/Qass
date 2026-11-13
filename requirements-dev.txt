@@ -1,0 +1,4 @@
+# Test-only dependencies (NOT installed in the Docker image)
+-r requirements.txt
+pytest
+pytest-asyncio

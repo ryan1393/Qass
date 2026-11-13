@@ -1,0 +1,80 @@
+{
+  "services": {
+    "qass-machine1": {
+      "command": [
+        "python3",
+        "main.py",
+        "configs/config_machine1.yaml"
+      ],
+      "environment": {
+        "HEALTH_PORT": 8081,
+        "QASS_LOG_FILE": "qass_machine1.log"
+      },
+      "image": "qass-service:13.0",
+      "network_mode": "host",
+      "restart": "always",
+      "volumes": [
+        "qass_state:/app/state",
+        "qass_logs:/app/logs"
+      ]
+    },
+    "qass-machine2": {
+      "command": [
+        "python3",
+        "main.py",
+        "configs/config_machine2.yaml"
+      ],
+      "environment": {
+        "HEALTH_PORT": 8082,
+        "QASS_LOG_FILE": "qass_machine2.log"
+      },
+      "image": "qass-service:13.0",
+      "network_mode": "host",
+      "restart": "always",
+      "volumes": [
+        "qass_state:/app/state",
+        "qass_logs:/app/logs"
+      ]
+    },
+    "qass-machine3": {
+      "command": [
+        "python3",
+        "main.py",
+        "configs/config_machine3.yaml"
+      ],
+      "environment": {
+        "HEALTH_PORT": 8083,
+        "QASS_LOG_FILE": "qass_machine3.log"
+      },
+      "image": "qass-service:13.0",
+      "network_mode": "host",
+      "restart": "always",
+      "volumes": [
+        "qass_state:/app/state",
+        "qass_logs:/app/logs"
+      ]
+    },
+    "qass-machine4": {
+      "command": [
+        "python3",
+        "main.py",
+        "configs/config_machine4.yaml"
+      ],
+      "environment": {
+        "HEALTH_PORT": 8084,
+        "QASS_LOG_FILE": "qass_machine4.log"
+      },
+      "image": "qass-service:13.0",
+      "network_mode": "host",
+      "restart": "always",
+      "volumes": [
+        "qass_state:/app/state",
+        "qass_logs:/app/logs"
+      ]
+    }
+  },
+  "volumes": {
+    "qass_logs": null,
+    "qass_state": null
+  }
+}

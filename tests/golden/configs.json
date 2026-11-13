@@ -1,0 +1,144 @@
+{
+  "config_machine1.yaml": {
+    "health": {
+      "port": 8081
+    },
+    "plc": {
+      "break_tag": "QASS_Break_Limit",
+      "crack_tag": "QASS_Crack_Limit",
+      "enable_writes": true,
+      "error_code_tag": "QASS_LastErrorCode",
+      "heartbeat_tag": "QASS_Heartbeat",
+      "ip": "10.16.81.164",
+      "last_stroke_tag": "QASS_LastStroke",
+      "plc_ok_tag": "QASS_PlcCommOK",
+      "qass_ok_tag": "QASS_QassConnected",
+      "serial_tag": "HMI_LAST_SCAN_PROCESS",
+      "service_ok_tag": "QASS_ServiceOK"
+    },
+    "qass": {
+      "disconnect_timeout_sec": 30,
+      "ip": "10.16.81.163",
+      "port": 17000,
+      "type": "manual"
+    },
+    "reconnect": {
+      "initial_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "config_machine2.yaml": {
+    "health": {
+      "port": 8082
+    },
+    "plc": {
+      "break_tag": "QASS_Break_Limit",
+      "crack_tag": "QASS_Crack_Limit",
+      "enable_writes": true,
+      "error_code_tag": "QASS_LastErrorCode",
+      "heartbeat_tag": "QASS_Heartbeat",
+      "ip": "10.16.81.236",
+      "last_stroke_tag": "QASS_LastStroke",
+      "plc_ok_tag": "QASS_PlcCommOK",
+      "qass_ok_tag": "QASS_QassConnected",
+      "serial_tag": "HMI_LAST_SCAN_PROCESS",
+      "service_ok_tag": "QASS_ServiceOK"
+    },
+    "qass": {
+      "disconnect_timeout_sec": 30,
+      "ip": "10.16.81.150",
+      "port": 17000,
+      "type": "manual"
+    },
+    "reconnect": {
+      "initial_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "config_machine3.yaml": {
+    "health": {
+      "port": 8083
+    },
+    "plc": {
+      "break_tag": "PROGRAM:PC_COMM.COM_TT200_From_PC.Break_Limit",
+      "crack_tag": "PROGRAM:PC_COMM.COM_TT200_From_PC.Crack_Limit",
+      "current_tag": "PROGRAM:PC_COMM.COM_TT250_From_PC.Qass_Measurement",
+      "enable_writes": true,
+      "error_code_tag": "QASS_LastErrorCode",
+      "heartbeat_tag": "QASS_Heartbeat",
+      "ip": "10.16.82.70",
+      "last_stroke_tag": "QASS_LastStroke",
+      "plc_ok_tag": "QASS_PlcCommOK",
+      "qass_ok_tag": "QASS_QassConnected",
+      "serial_tag": "PROGRAM:PC_COMM.COM_TT200_From_PC.Serial_Num",
+      "service_ok_tag": "QASS_ServiceOK"
+    },
+    "qass": {
+      "disconnect_timeout_sec": 30,
+      "ip": "10.16.82.99",
+      "port": 17000,
+      "type": "auto"
+    },
+    "reconnect": {
+      "initial_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "config_machine4.yaml": {
+    "health": {
+      "port": 8084
+    },
+    "plc": {
+      "break_tag": "PROGRAM:PC_COMM.COM_TT200_From_PC.Qass_Break_Limit",
+      "crack_tag": "PROGRAM:PC_COMM.COM_TT200_From_PC.Qass_Crack_Limit",
+      "current_tag": "PROGRAM:PC_COMM.COM_TT250_From_PC.Qass_Measurement",
+      "enable_writes": true,
+      "error_code_tag": "QASS_LastErrorCode",
+      "heartbeat_tag": "QASS_Heartbeat",
+      "ip": "10.16.82.64",
+      "last_stroke_tag": "QASS_LastStroke",
+      "plc_ok_tag": "QASS_PlcCommOK",
+      "qass_ok_tag": "QASS_QassConnected",
+      "serial_tag": "PROGRAM:PC_COMM.COM_TT200_From_PC.Serial_Num",
+      "service_ok_tag": "QASS_ServiceOK"
+    },
+    "qass": {
+      "disconnect_timeout_sec": 30,
+      "ip": "10.16.82.98",
+      "port": 17000,
+      "type": "auto"
+    },
+    "reconnect": {
+      "initial_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "default.yaml": {
+    "health": {
+      "port": 8083
+    },
+    "plc": {
+      "break_tag": "QASS_Break_Limit",
+      "crack_tag": "QASS_Crack_Limit",
+      "enable_writes": false,
+      "error_code_tag": "QASS_LastErrorCode",
+      "heartbeat_tag": "QASS_Heartbeat",
+      "ip": "10.16.82.70",
+      "last_stroke_tag": "QASS_LastStroke",
+      "plc_ok_tag": "QASS_PlcCommOK",
+      "qass_ok_tag": "QASS_QassConnected",
+      "serial_tag": "PC_COMM.COM_TT300_From_PC.Serial_Num",
+      "service_ok_tag": "QASS_ServiceOK"
+    },
+    "qass": {
+      "disconnect_timeout_sec": 30,
+      "ip": "10.16.82.99",
+      "port": 17000,
+      "type": "auto"
+    },
+    "reconnect": {
+      "initial_delay": 1,
+      "max_delay": 30
+    }
+  }
+}

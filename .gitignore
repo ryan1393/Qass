@@ -10,3 +10,6 @@ __pycache__/
 
 # Local secrets, if ever added
 .env
+
+# Test cache
+.pytest_cache/

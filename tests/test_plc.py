@@ -1,0 +1,203 @@
+"""PLC call serialization, heartbeat/status contract, watchdogs and error codes."""
+
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from conftest import SERIAL_TAG, STATUS_TAGS, free_port, make_cfg
+from fakes import rec, wait_until
+
+
+def heartbeat_blocks(plc):
+    """Split the call log into heartbeat transactions; each must be the 6 status
+    writes, contiguous and in contract order."""
+    calls = [c for c in plc.calls if c.kind in ("read", "write")]
+    blocks = []
+    i = 0
+    while i < len(calls):
+        c = calls[i]
+        if c.kind == "write" and c.tag == STATUS_TAGS[0]:
+            block = calls[i:i + 6]
+            if len(block) < 6:
+                break  # in-flight at the end of the test
+            assert [b.tag for b in block] == STATUS_TAGS, [b.tag for b in block]
+            assert all(b.kind == "write" for b in block)
+            blocks.append(block)
+            i += 6
+        else:
+            assert not (c.kind == "write" and c.tag in STATUS_TAGS), "stray status write"
+            i += 1
+    return blocks
+
+
+def values(block):
+    return [c.value for c in block]
+
+
+async def test_startup_reads_serial_first(run_service, plc, qass):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())):
+        await wait_until(lambda: len(plc.calls) >= 2)
+    assert (plc.calls[0].kind, plc.calls[0].tag) == ("init", "10.99.0.1")
+    assert (plc.calls[1].kind, plc.calls[1].tag) == ("read", SERIAL_TAG)
+
+
+async def test_plc_calls_run_in_executor_and_never_overlap(run_service, plc, qass, clock):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        for _ in range(5):
+            await qass.send_records(rec("true", 3, 0, 1, 1), rec("false"), gap=0.005)
+        await clock.sim_sleep(12)
+    main = threading.main_thread().name
+    io_calls = [c for c in plc.calls if c.kind in ("read", "write")]
+    assert io_calls and all(c.thread != main for c in io_calls)
+    assert plc.max_inflight == 1
+
+
+async def test_heartbeat_contract(run_service, plc, qass, clock):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        await qass.send_records(rec("true", 3, 0, 1, 1), rec("false"))
+        await wait_until(lambda: svc.worker.stroke == 2)
+        for _ in range(8):  # keep QASS data fresh -> error code 0
+            await qass.send_records(rec("false"))
+            await clock.sim_sleep(2)
+        blocks = heartbeat_blocks(plc)
+
+    assert len(blocks) >= 3
+    hb = [values(b)[0] for b in blocks]
+    assert hb == [1, 0, 1, 0, 1, 0, 1, 0][: len(hb)]
+    last = values(blocks[-1])
+    assert last[1] is True                   # service_ok
+    assert last[2] is True                   # qass_ok
+    assert last[3] is True                   # plc_ok
+    assert last[4] == 2                      # last_stroke = current stroke counter
+    assert last[5] == 0 and type(last[5]) is int  # error code NONE
+    # heartbeat period 5 s
+    starts = [b[0].t for b in blocks]
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert all(abs(g - 5) < 0.75 for g in gaps), gaps
+
+
+async def test_timer_intervals(run_service, plc, qass, clock, conns):
+    """ident loop 1 s, PLC watchdog 2 s, QASS watchdog 2 s, heartbeat 5 s."""
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())):
+        await qass.wait_connections(1)
+        await clock.sim_sleep(11)
+    receiver = conns.attempts[0][0]
+    per_task: dict = {}
+    for task, delay, _ in clock.sleeps:
+        if task is receiver or delay == 0:
+            continue
+        per_task.setdefault(task, set()).add(delay)
+    assert sorted(sorted(s) for s in per_task.values()) == [[1], [2], [2], [5]]
+
+    serial_reads = [c.t for c in plc.calls if c.kind == "read"]
+    gaps = [b - a for a, b in zip(serial_reads[1:], serial_reads[2:])]
+    assert all(abs(g - 1) < 0.5 for g in gaps), gaps
+
+
+async def test_plc_exception_recreates_connection_and_sets_error(run_service, plc, qass, clock):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        errors_before = svc.worker.metrics.error_count
+        plc.fail_reads = 1
+        await wait_until(lambda: svc.worker.last_error_code == 20, timeout=3, interval=0.0005)
+        await wait_until(lambda: plc.instances == 2)
+        assert svc.worker.metrics.error_count == errors_before + 1
+        n = len(plc.calls)
+        await clock.sim_sleep(3)
+
+    kinds = [(c.kind, c.instance) for c in plc.calls]
+    fail_idx = next(i for i, c in enumerate(plc.calls) if c.kind == "close" and c.instance == 1)
+    assert plc.calls[fail_idx - 1].kind == "read"           # the failing call
+    assert (plc.calls[fail_idx + 1].kind, plc.calls[fail_idx + 1].tag) == ("init", "10.99.0.1")
+    # traffic continues on the new object
+    assert any(k == ("read", 2) for k in kinds[n:])
+
+
+async def test_plc_watchdog_threshold(run_service, plc, qass, clock):
+    plc.tags[SERIAL_TAG] = "SN1"
+    cfg = make_cfg(qass.port, free_port(), enable_writes=False)
+    async with run_service(cfg) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        await clock.sim_sleep(3)
+        assert svc.worker.metrics.plc_connected is True
+        plc.fail_all = True
+        await clock.sim_sleep(6)
+        assert svc.worker.metrics.plc_connected is True   # < 10 s without success
+        await clock.sim_sleep(8)
+        assert svc.worker.metrics.plc_connected is False  # > 10 s
+        plc.fail_all = False
+        await clock.sim_sleep(4)
+        assert svc.worker.metrics.plc_connected is True
+
+
+async def test_error_codes_written_to_plc(run_service, plc, qass, clock, conns):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        for _ in range(4):
+            await qass.send_records(rec("false"))
+            await clock.sim_sleep(2)
+        n_ok = len(heartbeat_blocks(plc))
+
+        # QASS connected but silent > 10 s -> 11 QASS_NO_DATA
+        await clock.sim_sleep(17)
+        n_nodata = len(heartbeat_blocks(plc))
+
+        # QASS gone -> 10 QASS_DISCONNECTED
+        conns.refuse = True
+        await qass.drop_client()
+        await clock.sim_sleep(8)
+        blocks = heartbeat_blocks(plc)
+
+    ok = [values(b) for b in blocks[:n_ok]]
+    nodata = [values(b) for b in blocks[n_ok:n_nodata]]
+    gone = [values(b) for b in blocks[n_nodata:]]
+    assert ok[-1][5] == 0 and ok[-1][2] is True
+    assert nodata[-1][5] == 11 and nodata[-1][2] is True
+    assert gone[-1][5] == 10 and gone[-1][2] is False
+    assert {v[5] for v in ok + nodata + gone} <= {0, 10, 11}
+
+
+# ---------------------------------------------------------------------------
+# Known bugs (strict xfail)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.known_bug
+@pytest.mark.xfail(strict=True, reason="BUG: one raising heartbeat write stops the heartbeat forever")
+async def test_heartbeat_survives_a_plc_exception(run_service, plc, qass, clock):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: len(heartbeat_blocks(plc)) >= 1)
+        plc.fail_writes = 1
+        await clock.sim_sleep(16)
+        assert svc.worker.metrics.plc_connected is True
+    assert len(heartbeat_blocks(plc)) >= 3
+
+
+@pytest.mark.known_bug
+@pytest.mark.xfail(strict=True, reason="BUG: pylogix error Status counts as PLC success")
+async def test_unreachable_plc_trips_watchdog(run_service, plc, qass, clock):
+    plc.tags[SERIAL_TAG] = "SN1"
+    cfg = make_cfg(qass.port, free_port(), enable_writes=False)
+    async with run_service(cfg) as svc:
+        await qass.wait_connections(1)
+        await wait_until(lambda: svc.worker.ident == "SN1")
+        plc.status_fail = True  # what real pylogix does when the PLC is down
+        await clock.sim_sleep(14)
+        assert svc.worker.metrics.plc_connected is False
