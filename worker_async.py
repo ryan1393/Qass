@@ -60,6 +60,39 @@ STATE_SAVE_EVERY = 25  # persist the stroke buffer every N samples
 LOG_TAIL_LINES = 100  # lines returned by /logs
 
 
+# pylogix reports comms problems through Response.Status instead of raising.
+# Tag-level errors (e.g. "Path destination unknown") mean the PLC answered, so
+# they are not comms failures.
+PLC_COMMS_FAILURE_STATUSES = frozenset({
+    "Connection failure",
+    "Connection lost",
+    "Register session failed",
+    "Forward open failed",
+})
+
+
+def _is_comms_failure(status: Any) -> bool:
+    """True if a pylogix Status string means the PLC could not be reached."""
+    text = str(status)
+    if text in PLC_COMMS_FAILURE_STATUSES:
+        return True
+    # Socket errors surface as "Unknown error <exception text>"; an unknown CIP
+    # code from a PLC that did answer is "Unknown error <number>".
+    if text.startswith("Unknown error "):
+        rest = text[len("Unknown error "):]
+        return rest != "Success" and not rest.isdigit()
+    return False
+
+
+def _comms_failures(result: Any) -> list[str]:
+    """Comms-failure statuses in a pylogix Response or a list of them."""
+    responses = result if isinstance(result, list) else [result]
+    return [
+        str(r.Status) for r in responses
+        if hasattr(r, "Status") and _is_comms_failure(r.Status)
+    ]
+
+
 NUMERIC_FIELDS = ("e_current", "e_max", "limitbreak", "limitcrack")
 
 
@@ -144,6 +177,7 @@ class AsyncWorker:
 
         # PLC watchdog tracking
         self.last_plc_ok = time.time()
+        self.plc_comms_failing = False  # last PLC call hit a comms-failure status
 
         # QASS tracking
         self.last_qass_data = 0.0  # last "measuring" payload (or connect)
@@ -355,13 +389,14 @@ class AsyncWorker:
 
         On an exception the PLC object is closed and recreated, the error is
         recorded (ERROR_PLC_COMMS) and the exception is re-raised.
+
+        ``fn`` returns a pylogix Response or a list of them. If any of them has a
+        comms-failure Status, the call does not count as a PLC success (it does
+        not refresh plc_ok / the watchdog) and ERROR_PLC_COMMS is recorded.
         """
         async with self.plc_lock:
             try:
                 result = await self.loop.run_in_executor(None, fn)
-                self.last_plc_ok = time.time()
-                self.metrics.mark_plc_success()
-                return result
             except Exception:
                 self.last_error_code = ERROR_PLC_COMMS
                 self.metrics.mark_error(ERROR_PLC_COMMS)
@@ -377,6 +412,23 @@ class AsyncWorker:
                     pass
 
                 raise
+
+            failures = _comms_failures(result)
+            if failures:
+                # The call returned, but the PLC was not reached: not a success.
+                self.last_error_code = ERROR_PLC_COMMS
+                self.metrics.mark_error(ERROR_PLC_COMMS)
+                if not self.plc_comms_failing:
+                    logging.error("PLC comms failure: %s", failures[0])
+                self.plc_comms_failing = True
+                return result
+
+            if self.plc_comms_failing:
+                logging.info("PLC comms restored")
+            self.plc_comms_failing = False
+            self.last_plc_ok = time.time()
+            self.metrics.mark_plc_success()
+            return result
 
     async def _write_plc(self, e_current: int, break_limit: int, crack_limit: int) -> None:
         """Write one stroke result. Order: break, crack, then the measurement tag."""
@@ -396,22 +448,34 @@ class AsyncWorker:
         else:
             raise ValueError(f"Unsupported qass type: {self.qass_type}")
 
-        def write() -> None:
-            self.plc_conn.Write(self.break_tag, break_limit)
-            self.plc_conn.Write(self.crack_tag, crack_limit)
-            self.plc_conn.Write(measurement_tag(), e_current)
+        def write() -> list[Any]:
+            responses = [
+                self.plc_conn.Write(self.break_tag, break_limit),
+                self.plc_conn.Write(self.crack_tag, crack_limit),
+                self.plc_conn.Write(measurement_tag(), e_current),
+            ]
             logging.debug(
                 "Write to PLC Serial=%s Stroke=%s ECurrent=%s Break=%s Crack=%s",
                 self.ident, self.stroke,
                 e_current, break_limit, crack_limit,
             )
+            return responses
 
-        await self._plc_call(write)
+        responses = await self._plc_call(write)
 
         elapsed_ms = (time.perf_counter() - start) * 1000
         self.metrics.last_plc_write_ms = elapsed_ms
         logging.debug("PLC write took %.1f ms", elapsed_ms)
-        self.metrics.mark_plc_success()
+
+        rejected = [
+            f"{r.TagName}={r.Status}" for r in responses
+            if getattr(r, "Status", "Success") != "Success"
+        ]
+        if rejected:
+            logging.error(
+                "PLC measurement write not confirmed: Serial=%s Stroke=%s %s",
+                self.ident, self.stroke, ", ".join(rejected),
+            )
 
     async def _serial_loop(self) -> None:
         """Read the serial tag every second; a new non-empty serial restarts at stroke 1."""
@@ -501,15 +565,17 @@ class AsyncWorker:
     async def _write_plc_status(self) -> None:
         """Write heartbeat and status tags, in this order, in one PLC transaction."""
 
-        def write() -> None:
-            self.plc_conn.Write(self.heartbeat_tag, self.heartbeat_value)
-            self.plc_conn.Write(self.service_ok_tag, True)
-            self.plc_conn.Write(self.qass_ok_tag, self.qass_connected)
-            self.plc_conn.Write(
-                self.plc_ok_tag, time.time() - self.last_plc_ok < PLC_COMMS_TIMEOUT_SEC
-            )
-            self.plc_conn.Write(self.last_stroke_tag, self.stroke)
-            self.plc_conn.Write(self.error_code_tag, self.last_error_code)
+        def write() -> list[Any]:
+            return [
+                self.plc_conn.Write(self.heartbeat_tag, self.heartbeat_value),
+                self.plc_conn.Write(self.service_ok_tag, True),
+                self.plc_conn.Write(self.qass_ok_tag, self.qass_connected),
+                self.plc_conn.Write(
+                    self.plc_ok_tag, time.time() - self.last_plc_ok < PLC_COMMS_TIMEOUT_SEC
+                ),
+                self.plc_conn.Write(self.last_stroke_tag, self.stroke),
+                self.plc_conn.Write(self.error_code_tag, self.last_error_code),
+            ]
 
         await self._plc_call(write)
 

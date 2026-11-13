@@ -199,17 +199,55 @@ async def test_heartbeat_survives_a_plc_exception(run_service, plc, qass, clock,
     assert all(v in (0, 1) for v in hb)
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(strict=True, reason="BUG: pylogix error Status counts as PLC success")
-async def test_unreachable_plc_trips_watchdog(run_service, plc, qass, clock):
+@pytest.mark.parametrize("enable_writes", [False, True])
+async def test_unreachable_plc_trips_watchdog(run_service, plc, qass, clock, caplog, enable_writes):
+    """Fixed bug: pylogix returns an error Status (it does not raise) when the PLC
+    is unreachable, and that used to count as a successful call."""
+    caplog.set_level("INFO")
     plc.tags[SERIAL_TAG] = "SN1"
-    cfg = make_cfg(qass.port, free_port(), enable_writes=False)
+    cfg = make_cfg(qass.port, free_port(), enable_writes=enable_writes)
     async with run_service(cfg) as svc:
         await qass.wait_connections(1)
         await wait_until(lambda: svc.worker.ident == "SN1")
+        errors_before = svc.worker.metrics.error_counts[20]
         plc.status_fail = True  # what real pylogix does when the PLC is down
+        await clock.sim_sleep(6)
+        assert svc.worker.metrics.plc_connected is True   # < 10 s
+        await clock.sim_sleep(8)
+        assert svc.worker.metrics.plc_connected is False  # > 10 s
+        assert svc.worker.metrics.error_counts[20] > errors_before
+        plc.status_fail = False
+        await clock.sim_sleep(4)
+        assert svc.worker.metrics.plc_connected is True
+    assert caplog.text.count("PLC comms failure: Unknown error [Errno 111]") == 1
+    assert "PLC comms restored" in caplog.text
+
+
+@pytest.mark.parametrize("status,is_failure", [
+    ("Success", False),
+    ("Path destination unknown", False),   # PLC answered: tag problem, not comms
+    ("Unknown error 255", False),          # PLC answered with an unknown CIP code
+    ("Unknown error Success", False),
+    ("Connection failure", True),
+    ("Connection lost", True),
+    ("Register session failed", True),
+    ("Forward open failed", True),
+    ("Unknown error [Errno 111] Connection refused", True),
+    ("Unknown error timed out", True),
+])
+def test_comms_failure_classification(status, is_failure):
+    from worker_async import _is_comms_failure
+    assert _is_comms_failure(status) is is_failure
+
+
+async def test_missing_tag_is_not_a_comms_failure(run_service, plc, qass, clock):
+    # serial tag not defined in the PLC -> "Path destination unknown" on every read
+    cfg = make_cfg(qass.port, free_port(), enable_writes=False)
+    async with run_service(cfg) as svc:
+        await qass.wait_connections(1)
         await clock.sim_sleep(14)
-        assert svc.worker.metrics.plc_connected is False
+        assert svc.worker.metrics.plc_connected is True
+        assert svc.worker.ident is None
 
 
 async def test_shutdown_closes_plc_once(run_service, plc, qass):

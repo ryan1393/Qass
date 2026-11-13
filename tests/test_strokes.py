@@ -381,3 +381,15 @@ async def test_unsupported_type_logs_and_keeps_counting(run_service, plc, qass, 
         await wait_until(lambda: svc.worker.stroke == 3)
     assert measurement_writes(plc) == []
     assert caplog.text.count("Unsupported qass type: semi") == 2
+
+
+async def test_rejected_measurement_write_is_logged(run_service, plc, qass, caplog):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await ready(svc, qass)
+        plc.status_fail = True
+        await qass.send_records(rec("true", 10, 0, 1, 1), rec("false"))
+        await wait_until(lambda: svc.worker.stroke == 2)
+        plc.status_fail = False
+    assert "PLC measurement write not confirmed: Serial=SN1 Stroke=1" in caplog.text
+
