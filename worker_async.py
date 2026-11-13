@@ -31,7 +31,6 @@ ERROR_PLC_COMMS = 20
 class AsyncWorker:
     def __init__(self, cfg):
         # ---------- Configuration ----------
-        self.plc_queue = asyncio.Queue(maxsize=1000)
         self.plc_lock = asyncio.Lock()
         
         # QASS TCP endpoint
@@ -119,7 +118,6 @@ class AsyncWorker:
         self.tasks = [
             asyncio.create_task(self._receiver()),
             asyncio.create_task(self._consumer()),
-            asyncio.create_task(self._plc_writer()),
             asyncio.create_task(self._ident_loop()),
             asyncio.create_task(self._plc_watchdog()),
             asyncio.create_task(self._heartbeat()),
@@ -342,23 +340,6 @@ class AsyncWorker:
         logging.debug("PLC write took %.1f ms",    elapsed_ms)
         self.metrics.mark_plc_success()
 
-    async def _plc_writer(self):
-        while not self.shutdown_flag:
-
-            e_current, break_l, crack_l = await self.plc_queue.get()
-
-            try:
-                await self._write_plc(
-                    e_current,
-                    break_l,
-                    crack_l
-                )
-
-            except Exception:
-                logging.exception(
-                    "PLC write failed"
-                )
-            
     async def _ident_loop(self):
         # Periodically read serial number from PLC
         def read_sn():
@@ -474,7 +455,7 @@ class AsyncWorker:
                     "reason": reason,
                     "metrics": self.metrics.snapshot(),
                     "qass_queue_depth": self.queue.qsize(),
-                    "plc_queue_depth": self.plc_queue.qsize(),
+                    "plc_queue_depth": 0,  # kept for dashboards; no PLC queue exists
                     "last_plc_write_ms": self.metrics.last_plc_write_ms,
                 },
                 status=200 if healthy else 503,
