@@ -280,20 +280,47 @@ async def test_state_is_restored_on_start(run_service, plc, qass, workdir):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(strict=True, reason="BUG: non-numeric e_current kills the consumer task")
-async def test_bad_numeric_record_is_skipped(run_service, plc, qass):
+@pytest.mark.parametrize("bad", [
+    rec("true", "abc", 0, 1, 1),        # non-numeric e_current
+    rec("true", 500, "n/a", 1, 1),      # non-numeric e_max
+    rec("true", 500, 0, "x", 1),        # non-numeric limitbreak
+    rec("true", 500, 0, 1, None),       # null limitcrack
+    rec("true", "12.5", 0, 1, 1),       # float string: int() rejects it
+])
+async def test_bad_numeric_record_is_skipped(run_service, plc, qass, caplog, bad):
+    """Fixed bug: a non-numeric field used to kill the consumer task."""
     plc.tags[SERIAL_TAG] = "SN1"
     async with run_service(make_cfg(qass.port, free_port())) as svc:
         await ready(svc, qass)
-        await qass.send_records(
-            rec("true", "abc", 0, 1, 1), rec("true", 30, 0, 2, 2), rec("false"))
+        await qass.send_records(bad, rec("true", 30, 0, 2, 2), rec("false"))
         await qass.send_records(rec("true", 40, 0, 3, 3), rec("false"))
-        await wait_until(lambda: len(measurement_writes(plc)) == 6, timeout=1.5)
+        await wait_until(lambda: len(measurement_writes(plc)) == 6, timeout=3)
+        assert svc.worker.stroke == 3
     assert measurement_writes(plc) == [
         (BREAK_TAG, 2), (CRACK_TAG, 2), (CURRENT_TAG, 30),
         (BREAK_TAG, 3), (CRACK_TAG, 3), (CURRENT_TAG, 40),
     ]
+    assert "Skipping QASS record with non-numeric" in caplog.text
+
+
+async def test_non_object_record_is_skipped(run_service, plc, qass, caplog):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await ready(svc, qass)
+        await qass.send('["measuring", 1]')  # valid JSON, not objects
+        await qass.send_records(rec("true", 30, 0, 2, 2), rec("false"))
+        await wait_until(lambda: len(measurement_writes(plc)) == 3, timeout=3)
+    assert "not a JSON object" in caplog.text
+
+
+async def test_numeric_like_values_still_accepted(run_service, plc, qass):
+    plc.tags[SERIAL_TAG] = "SN1"
+    async with run_service(make_cfg(qass.port, free_port())) as svc:
+        await ready(svc, qass)
+        await qass.send_records(
+            rec("true", 12.9, 1.5, " 7 ", True), rec("false"))  # int() accepts all
+        await wait_until(lambda: len(measurement_writes(plc)) == 3, timeout=3)
+    assert measurement_writes(plc) == [(BREAK_TAG, 7), (CRACK_TAG, 1), (CURRENT_TAG, 12)]
 
 
 @pytest.mark.known_bug

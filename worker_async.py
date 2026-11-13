@@ -60,6 +60,20 @@ STATE_SAVE_EVERY = 25  # persist the stroke buffer every N samples
 LOG_TAIL_LINES = 100  # lines returned by /logs
 
 
+NUMERIC_FIELDS = ("e_current", "e_max", "limitbreak", "limitcrack")
+
+
+def _non_numeric_fields(record: dict) -> list[str]:
+    """Fields that the stroke logic would fail to convert with int()."""
+    bad = []
+    for name in NUMERIC_FIELDS:
+        try:
+            int(record.get(name, 0))
+        except (TypeError, ValueError):
+            bad.append(name)
+    return bad
+
+
 class AsyncWorker:
     """Runs one machine: one QASS unit, one PLC. Must be created inside a running loop."""
 
@@ -261,10 +275,22 @@ class AsyncWorker:
     async def _process_record(self, record: dict) -> None:
         """Buffer samples while measuring; on the first non-measuring record,
         write the sample with the highest e_current to the PLC."""
+        if not isinstance(record, dict):
+            logging.warning("Skipping QASS record that is not a JSON object: %r", record)
+            return
+
         measuring = str(record.get("measuring")).lower() == "true"
 
         # Buffer samples during an active stroke
         if measuring:
+            bad_fields = _non_numeric_fields(record)
+            if bad_fields:
+                # Never let one bad sample stop stroke processing.
+                logging.warning(
+                    "Skipping QASS record with non-numeric %s: %r",
+                    ", ".join(bad_fields), record,
+                )
+                return
             self.stroke_buffer.append(record)
             if len(self.stroke_buffer) % STATE_SAVE_EVERY == 0:
                 self.state.save(self.ident, self.stroke, self.stroke_buffer)
