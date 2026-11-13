@@ -18,14 +18,13 @@ from pylogix import PLC
 from paths import LOG_DIR
 from state_store import StrokeStateStore
 from qass_normalizer import split_and_parse_qass_json
-from metrics import Metrics
-
-
-# Numeric error codes for PLC / monitoring
-ERROR_NONE = 0
-ERROR_QASS_DISCONNECTED = 10
-ERROR_QASS_NO_DATA = 11
-ERROR_PLC_COMMS = 20
+from metrics import (
+    ERROR_NONE,
+    ERROR_PLC_COMMS,
+    ERROR_QASS_DISCONNECTED,
+    ERROR_QASS_NO_DATA,
+    Metrics,
+)
 
 
 class AsyncWorker:

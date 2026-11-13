@@ -2,11 +2,19 @@ import time
 from threading import Lock
 from collections import defaultdict
 
+# Error codes written to the PLC error_code_tag and reported by /metrics.
+# The PLC program reads these numbers: do not renumber them.
+# Plain ints on purpose (the PLC write must receive an int, not an Enum).
+ERROR_NONE = 0
+ERROR_QASS_DISCONNECTED = 10
+ERROR_QASS_NO_DATA = 11  # connected, but no "measuring" data for 10 s
+ERROR_PLC_COMMS = 20
+
 ERROR_NAMES = {
-    0: "NONE",
-    10: "QASS_DISCONNECTED",
-    11: "QASS_NO_DATA",
-    20: "PLC_COMMS",
+    ERROR_NONE: "NONE",
+    ERROR_QASS_DISCONNECTED: "QASS_DISCONNECTED",
+    ERROR_QASS_NO_DATA: "QASS_NO_DATA",
+    ERROR_PLC_COMMS: "PLC_COMMS",
 }
 
 class Metrics:
