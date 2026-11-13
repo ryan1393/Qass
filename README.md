@@ -177,12 +177,10 @@ to tags, IPs or ports fails the run.
 
 - `configs/default.yaml` is `type: auto` without `plc.current_tag`, so it does
   not start. Production does not use it.
-- Manual mode: if a new serial is read while a stroke's write is waiting for the
-  PLC lock (a window of milliseconds), that stroke is written to
-  `QASS_Measurement_1`, and the new part's first stroke becomes 2.
-- When the PLC host is down, each pylogix call can block for its 5 s socket
-  timeout. One heartbeat (6 writes) can then hold the PLC lock for up to 30 s,
-  and serial reads and measurement writes wait behind it.
+- When the PLC host is down, each pylogix call still waits for its 5 s socket
+  timeout. A transaction stops at its first comms failure, so the PLC lock is
+  held for about 5 s per heartbeat or stroke, not 30 s.
 - A measurement write that fails is not retried, so that stroke's values never
-  reach the PLC (it is logged).
+  reach the PLC (it is logged). This is deliberate: a late write could be applied
+  to the wrong part. Retries would need a handshake defined on the PLC side.
 - The HTTP endpoints have no authentication and listen on all interfaces.
