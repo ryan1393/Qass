@@ -2,17 +2,22 @@
 
 One worker runs per machine (one Docker container each). Background tasks:
 
-* ``_receiver``       reads raw QASS payloads and queues the ones with "measuring"
-* ``_consumer``       parses queued payloads and detects strokes
+* ``_receiver``       reads the QASS TCP stream, reassembles complete JSON records
+                      (QassStreamFramer) and queues the ones containing "measuring"
+* ``_consumer``       parses queued records and detects strokes (finishing a stroke
+                      on its end marker or after MAX_STROKE_SEC of measuring)
 * ``_serial_loop``    reads the part serial number from the PLC every second
 * ``_plc_watchdog``   flags PLC comms as lost after 10 s without a successful call
-* ``_qass_watchdog``  derives the error code and exits the process when QASS has
-                      been silent for ``qass.disconnect_timeout_sec``
+* ``_qass_watchdog``  derives the error code (10 > 11 > 20 > 0) and exits the
+                      process when QASS has been silent for ``qass.disconnect_timeout_sec``
 * ``_heartbeat``      writes heartbeat + status tags to the PLC every 5 s
-* ``_health_server``  serves /health, /metrics and /logs
+* ``_health_server``  serves /health, /metrics and /logs (retrying the bind)
 
 All PLC calls go through ``_plc_call``: one lock, blocking pylogix calls run in
-the default thread-pool executor.
+the default thread-pool executor. A call fails if it raises or if pylogix returns
+a comms-failure Status; a transaction stops at its first comms failure.
+
+Every interval and timeout uses ``monotonic()``, never the wall clock.
 
 PLC contract: the tag names, values, write order and intervals below are read
 by the PLC program. Do not change them without changing the PLC program.

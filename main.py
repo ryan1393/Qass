@@ -9,6 +9,8 @@ Environment:
   QASS_STATE_DIR state directory (default ./state next to the code)
   HEALTH_PORT    only used by the Dockerfile HEALTHCHECK; the service listens
                  on health.port from the config
+  QASS_ENABLE_WRITES  true/false overrides plc.enable_writes (unset: use the
+                 config); see config.apply_env_overrides
 """
 
 import asyncio
